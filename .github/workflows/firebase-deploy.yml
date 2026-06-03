@@ -1,0 +1,26 @@
+name: Deploy to Firebase Hosting
+
+# Auto-deploy public/ to the live Hosting site (student-survey-hksyu.web.app)
+# on every push to main. Authentication uses the FIREBASE_SERVICE_ACCOUNT
+# repository secret (a Google service-account JSON key with Hosting deploy access).
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Firebase Hosting (live channel)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: student-survey-9b441
