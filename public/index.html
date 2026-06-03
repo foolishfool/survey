@@ -171,14 +171,9 @@
 
   <div id="view"></div>
 
-  <details>
-    <summary>Survey settings</summary>
-    <p>Questions are read live from a Google Spreadsheet. Each <b>tab (sheet)</b> is its own survey, and responses are saved to a Firestore collection named after that sheet.</p>
-    <div class="field"><label>Google Spreadsheet link</label><input id="cfgSheetLink" placeholder="https://docs.google.com/spreadsheets/d/.../edit"></div>
-    <div class="field"><label>Sheet index (0 = first tab)</label><input id="cfgSheetIndex" type="number" min="0" step="1" placeholder="0"></div>
-    <button class="btn ghost" onclick="saveCfg()">Save settings</button>
-    <p id="sheetNameOut" style="margin-top:12px"></p>
-    <p style="margin-top:8px">Enter just the tab's <b>index</b>; its name is read from the spreadsheet and used as the responses collection. Share the spreadsheet as <b>Anyone with the link → Viewer</b>. First row = column headers (<code>ID, Type, Question, Option1, …</code>); each following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>
+  <details id="settings">
+    <summary>Survey settings (admin only)</summary>
+    <div id="settingsBody"></div>
   </details>
 </div>
 
@@ -258,8 +253,7 @@ const view=$('#view');
 (function init(){
   const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
   if(localStorage_has('pulse_sheet_index')) SHEET_INDEX=parseInt(localStorage_get('pulse_sheet_index'),10)||0;
-  if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
-  if($('#cfgSheetIndex')) $('#cfgSheetIndex').value = SHEET_INDEX;
+  renderAdminPanel();   // builds the settings panel (login form, or the controls if already admin)
   loadQuestions();
 })();
 
@@ -566,6 +560,59 @@ function makeChart(canvas,q,counts){
 
 // ---------- helpers ----------
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+// ---------- ADMIN GATE ----------
+// The survey settings (which spreadsheet / sheet to use) are editable only by an
+// admin. This is presentation-level gating: the password is checked client-side
+// against a SHA-256 hash, which hides/locks the controls from respondents. Actual
+// data protection is enforced by the Firestore security rules, not by this.
+const ADMIN_USER = "admin";
+// SHA-256 of the admin password. Default password is "hksyu2026".
+// To change it: hash the new password with SHA-256 and replace this value.
+const ADMIN_PASS_SHA256 = "fcf085318cc8c17f3d401023658691bf7f5ac8737f7ee32bdf7c283a03daf7f8";
+
+function isAdmin(){ return localStorage_get('pulse_admin')==='1'; }
+
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function adminLogin(){
+  const u=($('#admUser')?$('#admUser').value:'').trim();
+  const p=$('#admPass')?$('#admPass').value:'';
+  let ok=false;
+  try{ ok = (u===ADMIN_USER) && (await sha256Hex(p))===ADMIN_PASS_SHA256; }catch(e){}
+  if(ok){ localStorage_set('pulse_admin','1'); renderAdminPanel(); }
+  else{ const m=$('#admMsg'); if(m){ m.textContent='Wrong username or password.'; m.style.display='block'; } }
+}
+
+function adminLogout(){ localStorage_set('pulse_admin',''); renderAdminPanel(); }
+
+// Render either the admin login form or the settings controls into #settingsBody.
+function renderAdminPanel(){
+  const body=$('#settingsBody'); if(!body) return;
+  if(isAdmin()){
+    body.innerHTML=`
+      <p>Signed in as <b>admin</b>. <a href="#" onclick="adminLogout();return false;">Log out</a></p>
+      <p>Questions are read live from a Google Spreadsheet. Each <b>tab</b> is its own survey; responses save to a Firestore collection named after that tab.</p>
+      <div class="field"><label>Google Spreadsheet link</label><input id="cfgSheetLink" placeholder="https://docs.google.com/spreadsheets/d/.../edit"></div>
+      <div class="field"><label>Sheet index (0 = first tab)</label><input id="cfgSheetIndex" type="number" min="0" step="1" placeholder="0"></div>
+      <button class="btn ghost" onclick="saveCfg()">Save settings</button>
+      <p id="sheetNameOut" style="margin-top:12px"></p>
+      <p style="margin-top:8px">Share the spreadsheet as <b>Anyone with the link → Viewer</b>. First row = headers (<code>ID, Type, Question, Option1, …</code>); each following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>`;
+    if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
+    if($('#cfgSheetIndex')) $('#cfgSheetIndex').value = SHEET_INDEX;
+    if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b> (collection: <b>'+esc(FIRESTORE_COLLECTION)+'</b>)';
+  }else{
+    body.innerHTML=`
+      <p>These settings are restricted to the survey administrator. Please log in.</p>
+      <div class="field"><label>Admin username</label><input id="admUser" autocomplete="username" placeholder="username"></div>
+      <div class="field"><label>Admin password</label><input id="admPass" type="password" autocomplete="current-password" placeholder="password" onkeydown="if(event.key==='Enter')adminLogin()"></div>
+      <div id="admMsg" class="banner err" style="display:none;margin-top:8px"></div>
+      <button class="btn ghost" onclick="adminLogin()">Log in</button>`;
+  }
+}
+
 function saveCfg(){
   SPREADSHEET_ID=extractSheetId($('#cfgSheetLink').value);
   let idx=parseInt($('#cfgSheetIndex').value,10); if(isNaN(idx)||idx<0) idx=0;
