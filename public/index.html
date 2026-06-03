@@ -1,0 +1,521 @@
+<!-- Survey app: reads questions from a Google Sheet (via Apps Script), collects responses, visualizes results -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Survey</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- Firebase (loaded from the CDN so the modular SDK works without a bundler) -->
+<script type="module">
+  // Firebase modular SDK, loaded from the CDN so it works in a plain static page (no bundler).
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
+  import { getFirestore, collection, addDoc, getDocs, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+  // Your web app's Firebase configuration
+  const firebaseConfig = {
+    apiKey: "AIzaSyB-AorxBdSdJaz-g3kzROA0xFpeDdgjoCc",
+    authDomain: "student-survey-9b441.firebaseapp.com",
+    projectId: "student-survey-9b441",
+    storageBucket: "student-survey-9b441.firebasestorage.app",
+    messagingSenderId: "1061228439255",
+    appId: "1:1061228439255:web:45a7507dffd03b8961f292",
+    measurementId: "G-M35BP3CWFR"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  try { getAnalytics(app); } catch (e) { /* analytics only reports on authorized https domains */ }
+  const db = getFirestore(app);
+
+  // Bridge so the (non-module) survey script below can read/write Firestore.
+  window.__fb = {
+    // Save one submission as a NEW document in the given collection.
+    async saveResponse(coll, answers){
+      await addDoc(collection(db, coll), { answers, createdAt: serverTimestamp() });
+    },
+    // Read every submission's answers from the given collection.
+    async loadResponses(coll){
+      const snap = await getDocs(collection(db, coll));
+      const out = [];
+      snap.forEach(d => { const v = d.data(); out.push(v && v.answers ? v.answers : {}); });
+      return out;
+    }
+  };
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=Spline+Sans+Mono:wght@400;500&display=swap');
+
+  :root{
+    --ink:#15130e; --paper:#f4efe6; --card:#fbf8f1;
+    --accent:#e8542b; --accent2:#1f6f5c; --line:#ddd4c4;
+    --muted:#6f6657;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Spline Sans Mono',monospace;
+    line-height:1.5;
+    background-image:radial-gradient(var(--line) 0.5px,transparent 0.5px);
+    background-size:22px 22px;
+  }
+  .wrap{max-width:760px;margin:0 auto;padding:32px 20px 80px}
+  header.top{display:flex;align-items:baseline;justify-content:space-between;border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:8px}
+  .logo{font-family:'Fraunces',serif;font-weight:900;font-size:34px;letter-spacing:-1px}
+  .logo span{color:var(--accent)}
+  .tag{font-size:12px;color:var(--muted)}
+  .tabs{display:flex;gap:6px;margin:20px 0 26px}
+  .tabs button{
+    font-family:'Spline Sans Mono',monospace;font-size:13px;cursor:pointer;
+    border:1.5px solid var(--ink);background:transparent;color:var(--ink);
+    padding:9px 16px;border-radius:999px;transition:.15s;
+  }
+  .tabs button.active{background:var(--ink);color:var(--paper)}
+  .tabs button:hover:not(.active){background:#0001}
+
+  h1{font-family:'Fraunces',serif;font-weight:900;font-size:clamp(30px,6vw,52px);line-height:1.02;margin:8px 0 4px;letter-spacing:-1.5px}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:26px}
+
+  .card{
+    background:var(--card);border:1.5px solid var(--line);border-radius:14px;
+    padding:22px;margin:0 0 18px;box-shadow:4px 4px 0 #15130e0d;
+  }
+  .qnum{font-size:11px;letter-spacing:1px;color:var(--accent);text-transform:uppercase}
+  .qtext{font-family:'Fraunces',serif;font-weight:600;font-size:20px;margin:6px 0 16px;line-height:1.25}
+  .opts{display:flex;flex-direction:column;gap:9px}
+  .opt{
+    display:flex;align-items:center;gap:11px;padding:12px 14px;border:1.5px solid var(--line);
+    border-radius:10px;cursor:pointer;background:#fff8;transition:.12s;font-size:14px;
+  }
+  .opt:hover{border-color:var(--ink)}
+  .opt.sel{border-color:var(--accent);background:#e8542b14;box-shadow:inset 0 0 0 1px var(--accent)}
+  .opt input{accent-color:var(--accent);width:16px;height:16px}
+  .scale{display:flex;gap:8px;flex-wrap:wrap}
+  .scale .opt{flex:1;min-width:54px;justify-content:center;font-weight:500}
+  textarea{
+    width:100%;border:1.5px solid var(--line);border-radius:10px;padding:12px;
+    font-family:inherit;font-size:14px;background:#fff8;resize:vertical;min-height:84px;color:var(--ink);
+  }
+  textarea:focus,.opt:focus-within{outline:2px solid var(--accent2);outline-offset:1px}
+  .other-in{width:100%;margin:-3px 0 3px;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;background:#fff8;color:var(--ink)}
+  .other-in:focus{outline:2px solid var(--accent2);outline-offset:1px}
+
+  .btn{
+    font-family:'Spline Sans Mono',monospace;font-size:15px;cursor:pointer;border:none;
+    background:var(--accent);color:#fff;padding:14px 26px;border-radius:10px;font-weight:500;
+    box-shadow:3px 3px 0 var(--ink);transition:.12s;
+  }
+  .btn:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--ink)}
+  .btn:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--ink)}
+  .btn.ghost{background:transparent;color:var(--ink);border:1.5px solid var(--ink);box-shadow:none}
+
+  .field{margin-bottom:16px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .field input{width:100%;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;background:#fff8;color:var(--ink)}
+
+  .res-q{font-family:'Fraunces',serif;font-weight:600;font-size:18px;margin:0 0 4px}
+  .res-meta{font-size:11px;color:var(--muted);margin-bottom:14px;text-transform:uppercase;letter-spacing:.5px}
+  .chartbox{position:relative;height:230px}
+  .texts{display:flex;flex-direction:column;gap:8px;max-height:260px;overflow:auto}
+  .texts .t{padding:10px 12px;border-left:3px solid var(--accent2);background:#1f6f5c10;border-radius:0 8px 8px 0;font-size:13px}
+  .bignum{font-family:'Fraunces',serif;font-weight:900;font-size:40px;color:var(--accent2)}
+
+  .banner{font-size:12px;padding:10px 14px;border-radius:9px;margin-bottom:18px;border:1.5px dashed var(--line)}
+  .banner.demo{background:#1f6f5c12;border-color:var(--accent2);color:var(--accent2)}
+  .banner.err{background:#e8542b14;border-color:var(--accent);color:var(--accent)}
+  .center{text-align:center;padding:50px 10px}
+  .center .big{font-family:'Fraunces',serif;font-weight:900;font-size:38px;margin:14px 0 6px}
+  .spin{width:26px;height:26px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 0.8s linear infinite;margin:30px auto}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .req{color:var(--accent);margin-left:4px}
+  details{margin-top:24px;font-size:12px;color:var(--muted)}
+  summary{cursor:pointer}
+  code{background:#15130e0d;padding:1px 5px;border-radius:4px}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="logo">Survey<span>.</span></div>
+    <div class="tag" id="srcTag">demo data</div>
+  </header>
+
+  <div class="tabs">
+    <button id="tabTake" class="active" onclick="show('take')">Take survey</button>
+    <button id="tabResults" onclick="show('results')">Results</button>
+  </div>
+
+  <div id="view"></div>
+
+  <details>
+    <summary>Survey settings</summary>
+    <p>Questions are read live from a Google Spreadsheet. Each <b>tab (sheet)</b> is its own survey, and responses are saved to a Firestore collection named after that sheet.</p>
+    <div class="field"><label>Google Spreadsheet link</label><input id="cfgSheetLink" placeholder="https://docs.google.com/spreadsheets/d/.../edit"></div>
+    <div class="field"><label>Sheet name / tab — also the database collection</label><input id="cfgSheetName" placeholder="Sheet1"></div>
+    <button class="btn ghost" onclick="saveCfg()">Save settings</button>
+    <p style="margin-top:12px">Share the spreadsheet as <b>Anyone with the link → Viewer</b>. The sheet's first row is the column headers (<code>ID, Type, Question, Option1, Option2, …</code>); every following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>
+  </details>
+</div>
+
+<script>
+// ====== CONFIG ======
+// Questions live in one Google Spreadsheet; each tab (sheet) is its own survey.
+// Pick the spreadsheet by id (from its link) and the tab by name. The Firestore
+// collection that stores responses is named after the sheet, so every tab gets
+// its own response set.
+let SPREADSHEET_ID = "1Uuip-8Sne2oIQeSaAQmbG_URymBybmE7P5mpjEC1Huo"; // taken from the spreadsheet link
+let SHEET_NAME = "Sheet1";                                          // tab to read; also the Firestore collection
+
+// Derived by applyConfig() from SPREADSHEET_ID + SHEET_NAME — don't set directly.
+let QUESTIONS_CSV_URL = "";
+let FIRESTORE_COLLECTION = "";
+// Legacy: Apps Script web-app URL (only used as a fallback when no sheet/collection is set).
+let APPS_SCRIPT_URL = "";
+
+// Build the CSV export URL and the collection name from the spreadsheet id + sheet name.
+function applyConfig(){
+  QUESTIONS_CSV_URL = SPREADSHEET_ID
+    ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/export?format=csv"
+        + (SHEET_NAME ? "&sheet="+encodeURIComponent(SHEET_NAME) : "")
+    : "";
+  FIRESTORE_COLLECTION = sanitizeCollection(SHEET_NAME);
+}
+// Firestore collection ids can't contain "/" or be "." / "..".
+function sanitizeCollection(name){
+  const c=(name||'').trim().replace(/\//g,'_');
+  return (!c||c==='.'||c==='..') ? '' : c;
+}
+// Accept either a full spreadsheet link or a bare id.
+function extractSheetId(s){
+  s=(s||'').trim();
+  const m=s.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : s;
+}
+
+// ====== DEMO DATA (used when no URL configured) ======
+// Question sourced from the Google Sheet (type "multi" = choose all that apply).
+const DEMO_QUESTIONS = [
+  {id:"1", type:"multi", question:"Why did you choose this major? (choose all that apply.)", options:[
+    "It genuinely interests me",
+    "Someone else influenced my decision (family, teacher, friend)",
+    "Job prospects / career opportunities",
+    "I wasn't sure what else to choose",
+    "Other (please specify): ___",
+  ]},
+];
+// In-browser response store. Seeded with sample rows (multi answers are arrays); real submissions get appended here too.
+let LOCAL_RESPONSES = [
+  {"1":["It genuinely interests me","Job prospects / career opportunities"]},
+  {"1":["Job prospects / career opportunities"]},
+  {"1":["It genuinely interests me"]},
+  {"1":["Someone else influenced my decision (family, teacher, friend)","I wasn't sure what else to choose"]},
+  {"1":["It genuinely interests me","Someone else influenced my decision (family, teacher, friend)","Job prospects / career opportunities"]},
+  {"1":["Job prospects / career opportunities","Other (please specify): ___"],"1__other":"It was the closest program to my hometown"},
+];
+
+let QUESTIONS=[], answers={}, demoMode=true, canSave=false, charts=[];
+
+const $=s=>document.querySelector(s);
+const view=$('#view');
+
+(function init(){
+  const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
+  if(localStorage_has('pulse_sheet_name')) SHEET_NAME=localStorage_get('pulse_sheet_name');
+  applyConfig();
+  if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
+  if($('#cfgSheetName')) $('#cfgSheetName').value = SHEET_NAME;
+  loadQuestions();
+})();
+
+async function loadQuestions(){
+  demoMode = !QUESTIONS_CSV_URL;
+  canSave = !!APPS_SCRIPT_URL;
+  if(!demoMode) LOCAL_RESPONSES = []; // don't mix demo seed rows into a live sheet
+  $('#srcTag').textContent = demoMode ? "demo data" : (usingDB() ? "live · database" : "live sheet");
+  if(demoMode){ QUESTIONS=DEMO_QUESTIONS; renderTake(); return; }
+  view.innerHTML='<div class="spin"></div>';
+  try{
+    const r=await fetch(QUESTIONS_CSV_URL);
+    if(!r.ok) throw new Error('http '+r.status);
+    const text=await r.text();
+    QUESTIONS=parseQuestionsCSV(text);
+    if(!QUESTIONS.length) throw new Error('no questions parsed');
+    renderTake();
+  }catch(e){
+    view.innerHTML='<div class="banner err">Could not load the CSV. Make sure the Questions tab is Published to web as CSV and the link is public. Showing demo instead.</div>';
+    demoMode=true; QUESTIONS=DEMO_QUESTIONS; $('#srcTag').textContent="demo data";
+    setTimeout(renderTake,1500);
+  }
+}
+
+// Parse a Google Sheet CSV into question objects. Supports two layouts:
+//   - id | type | question | options          (options pipe-separated: "A|B|C")
+//   - ID | Type | Question | Option1 | Option2 | ...   (one option per column)
+// Any column that isn't id/type/question is treated as an option cell, so the
+// option count is flexible (e.g. a 6th option just needs a 6th column).
+function parseQuestionsCSV(text){
+  const rows=parseCSV(text);
+  if(!rows.length) return [];
+  const head=rows.shift().map(h=>h.toLowerCase().trim());
+  const ci=name=>head.indexOf(name);
+  const idIdx=ci('id'), typeIdx=ci('type'), qIdx=ci('question'), optIdx=ci('options');
+  if(idIdx<0) return [];
+  return rows.filter(r=>r[idIdx]&&r[idIdx].trim()).map(r=>{
+    let options;
+    if(optIdx>=0){
+      const o=(r[optIdx]||'').trim();
+      options=o?o.split('|').map(s=>s.trim()).filter(Boolean):[];
+    }else{
+      options=r.filter((_,i)=>i!==idIdx&&i!==typeIdx&&i!==qIdx).map(s=>(s||'').trim()).filter(Boolean);
+    }
+    return {
+      id:r[idIdx].trim(),
+      type:normalizeType(typeIdx>=0?r[typeIdx]:''),
+      question:(qIdx>=0?(r[qIdx]||''):'').toString().trim(),
+      options
+    };
+  });
+}
+
+// Map free-form sheet "Type" text to an internal question type.
+//   Multi-Choise / checkbox     -> multi  (pick many)
+//   Single-Choise / radio       -> choice (pick exactly one)
+//   scale / rating              -> scale
+//   text / open / paragraph     -> text
+function normalizeType(t){
+  t=(t||'').toString().toLowerCase();
+  if(/multi|checkbox|all that apply/.test(t)) return 'multi';
+  if(/single|radio|one[\s-]?choice/.test(t)) return 'choice';
+  if(/scale|rating|nps|likert/.test(t)) return 'scale';
+  if(/text|open|paragraph|short answer|long answer|free/.test(t)) return 'text';
+  return 'choice';
+}
+
+// Minimal RFC-4180 CSV parser (handles quotes, commas & newlines inside quotes).
+function parseCSV(text){
+  const rows=[]; let row=[], field='', q=false;
+  text=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){field+='"';i++;} else q=false; }
+      else field+=c;
+    }else{
+      if(c==='"') q=true;
+      else if(c===',') { row.push(field); field=''; }
+      else if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else field+=c;
+    }
+  }
+  if(field.length||row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r=>r.some(c=>c!==''));
+}
+
+function show(which){
+  $('#tabTake').classList.toggle('active',which==='take');
+  $('#tabResults').classList.toggle('active',which==='results');
+  which==='take'?renderTake():renderResults();
+}
+
+// ---------- TAKE ----------
+function renderTake(){
+  let html=`<h1>Tell us what you think.</h1>
+    <p class="sub">${QUESTIONS.length} questions · ~2 min${demoMode?' · running on demo data':''}</p>`;
+  QUESTIONS.forEach((q,i)=>{
+    html+=`<div class="card"><div class="qnum">Question ${i+1}</div>
+      <div class="qtext">${esc(q.question)}<span class="req">*</span></div>`;
+    if(q.type==='text'){
+      html+=`<textarea id="a_${q.id}" placeholder="Type your answer…">${esc(answers[q.id]||'')}</textarea>`;
+    }else if(q.type==='multi'){
+      const chosen=Array.isArray(answers[q.id])?answers[q.id]:[];
+      html+=`<div class="opts">`;
+      q.options.forEach((o,oi)=>{
+        const sel=chosen.includes(o)?'sel':'';
+        html+=`<label class="opt ${sel}" onclick="toggle('${q.id}',${oi})">
+          <input type="checkbox" name="${q.id}" ${sel?'checked':''}> ${esc(o)}</label>`;
+        if(isOther(o)&&sel){
+          html+=`<input class="other-in" id="other_${q.id}" placeholder="Please specify…" value="${esc(answers[q.id+'__other']||'')}" oninput="setOther('${q.id}',this.value)">`;
+        }
+      });
+      html+=`</div>`;
+    }else{
+      const cls=q.type==='scale'?'scale':'opts';
+      html+=`<div class="${cls}">`;
+      q.options.forEach(o=>{
+        const sel=answers[q.id]===o?'sel':'';
+        html+=`<label class="opt ${sel}" onclick="pick('${q.id}','${esc(o)}')">
+          <input type="radio" name="${q.id}" ${sel?'checked':''}> ${esc(o)}</label>`;
+        if(q.type!=='scale'&&isOther(o)&&sel){
+          html+=`<input class="other-in" id="other_${q.id}" placeholder="Please specify…" value="${esc(answers[q.id+'__other']||'')}" oninput="setOther('${q.id}',this.value)">`;
+        }
+      });
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+  });
+  html+=`<div id="msg"></div><button class="btn" onclick="submit()">Submit response →</button>`;
+  view.innerHTML=html;
+}
+function pick(qid,val){ answers[qid]=val; if(!isOther(val)) delete answers[qid+'__other']; renderTake(); }
+function toggle(qid,optIndex){
+  const q=QUESTIONS.find(x=>x.id===qid); if(!q) return;
+  const val=q.options[optIndex];
+  const cur=Array.isArray(answers[qid])?answers[qid].slice():[];
+  const at=cur.indexOf(val);
+  if(at>=0){ cur.splice(at,1); if(isOther(val)) delete answers[qid+'__other']; }
+  else cur.push(val);
+  answers[qid]=cur;
+  renderTake();
+}
+// An option that invites free text, e.g. "Other (please specify): ___".
+function isOther(o){ return /please specify/i.test(o)||/^\s*other\b/i.test(o); }
+function setOther(qid,val){ answers[qid+'__other']=val; }
+
+async function submit(){
+  // collect text answers
+  QUESTIONS.forEach(q=>{ if(q.type==='text'){const el=$('#a_'+q.id); if(el) answers[q.id]=el.value.trim();} });
+  const missing=QUESTIONS.filter(q=>{ const a=answers[q.id]; return Array.isArray(a)?!a.length:!a; });
+  if(missing.length){ $('#msg').innerHTML=`<div class="banner err">Please answer all questions (${missing.length} left).</div>`; return; }
+
+  const btn=document.querySelector('.btn'); btn.textContent='Saving…'; btn.disabled=true;
+
+  const payload={...answers};
+  let savedTo=' (this browser only)';
+  try{
+    if(usingDB()){
+      const fb=await fbWait();
+      if(!fb) throw new Error('Firebase not ready');
+      await fb.saveResponse(FIRESTORE_COLLECTION,payload); // new record in Firestore
+      savedTo=' to the database';
+    }else if(canSave){
+      await fetch(APPS_SCRIPT_URL,{
+        method:'POST',
+        // Apps Script web apps accept simple requests; text/plain avoids a CORS preflight
+        headers:{'Content-Type':'text/plain;charset=utf-8'},
+        body:JSON.stringify({action:'submit',answers:payload})
+      });
+      savedTo=' to the sheet';
+    }
+    LOCAL_RESPONSES.push(payload); // also keep locally for instant results view
+  }catch(e){
+    $('#msg').innerHTML='<div class="banner err">Save failed — '+esc(e.message||'check your database settings and Firestore rules')+'.</div>';
+    btn.textContent='Submit response →'; btn.disabled=false; return;
+  }
+  answers={};
+  view.innerHTML=`<div class="center">
+    <div class="bignum">✓</div>
+    <div class="big">Thanks!</div>
+    <p class="sub">Your response was recorded${savedTo}.</p>
+    <button class="btn ghost" onclick="show('results')">See the results →</button>
+  </div>`;
+}
+
+// ---------- RESULTS ----------
+async function renderResults(){
+  charts.forEach(c=>c.destroy()); charts=[];
+  view.innerHTML='<div class="spin"></div>';
+  let responses=[];
+  if(usingDB()){
+    try{
+      const fb=await fbWait();
+      if(!fb) throw new Error('Firebase not ready');
+      responses=await fb.loadResponses(FIRESTORE_COLLECTION); // read straight from the database
+    }catch(e){
+      view.innerHTML='<div class="banner err">Could not read from the database — '+esc(e.message||'check your Firestore rules')+'.</div>';
+      return;
+    }
+  }else if(canSave){
+    try{ const r=await fetch(APPS_SCRIPT_URL+"?action=responses"); const d=await r.json(); responses=d.responses||d; }
+    catch(e){ responses=LOCAL_RESPONSES.slice(); } // fall back to anything captured this session
+  }else{
+    responses=LOCAL_RESPONSES.slice();
+  }
+  if(!responses.length){ view.innerHTML='<div class="center"><div class="big">No responses yet</div><p class="sub">Be the first to take it.</p></div>'; return; }
+
+  let html=`<h1>The results.</h1><p class="sub">${responses.length} response${responses.length>1?'s':''} so far</p>`;
+  if(demoMode) html+=`<div class="banner demo">Demo mode — add your Questions CSV link to go live.</div>`;
+  else if(usingDB()) html+=`<div class="banner demo">Live results from the “${esc(FIRESTORE_COLLECTION)}” collection in Firestore.</div>`;
+  else if(!canSave) html+=`<div class="banner demo">Reading questions from your sheet. Responses are kept in this browser only — set a Firestore collection to save them to the database.</div>`;
+  view.innerHTML=html;
+
+  QUESTIONS.forEach(q=>{
+    const card=document.createElement('div'); card.className='card';
+    card.innerHTML=`<div class="res-q">${esc(q.question)}</div><div class="res-meta">${q.type}</div>`;
+    if(q.type==='text'){
+      const box=document.createElement('div'); box.className='texts';
+      const ans=responses.map(r=>r[q.id]).filter(Boolean);
+      box.innerHTML = ans.length? ans.map(a=>`<div class="t">${esc(a)}</div>`).join('') : '<div class="res-meta">No text answers.</div>';
+      card.appendChild(box);
+    }else{
+      const counts={}; q.options.forEach(o=>counts[o]=0);
+      responses.forEach(r=>{
+        const v=r[q.id];
+        if(v==null||v==='') return;
+        if(Array.isArray(v)) v.forEach(o=>{ if(o!=null&&o!=='') counts[o]=(counts[o]||0)+1; });
+        else counts[v]=(counts[v]||0)+1;
+      });
+      const cv=document.createElement('div'); cv.className='chartbox';
+      const cvs=document.createElement('canvas'); cv.appendChild(cvs); card.appendChild(cv);
+      const others=responses.map(r=>r[q.id+'__other']).filter(v=>v!=null&&String(v).trim()!=='');
+      if(others.length){
+        const ob=document.createElement('div'); ob.className='texts'; ob.style.marginTop='14px';
+        ob.innerHTML='<div class="res-meta">Other (please specify)</div>'+others.map(a=>`<div class="t">${esc(a)}</div>`).join('');
+        card.appendChild(ob);
+      }
+      view.appendChild(card);
+      charts.push(makeChart(cvs,q,counts));
+      return;
+    }
+    view.appendChild(card);
+  });
+}
+
+function makeChart(canvas,q,counts){
+  const labels=Object.keys(counts), data=Object.values(counts);
+  const palette=['#e8542b','#1f6f5c','#d9a441','#3a6ea5','#9c4f96','#6f6657'];
+  const isScale=q.type==='scale';
+  return new Chart(canvas,{
+    type:isScale?'bar':'doughnut',
+    data:{labels,datasets:[{data,
+      backgroundColor:isScale?'#1f6f5c':labels.map((_,i)=>palette[i%palette.length]),
+      borderColor:'#fbf8f1',borderWidth:isScale?0:3,borderRadius:isScale?6:0}]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:!isScale,position:'right',onClick:()=>{},labels:{font:{family:'Spline Sans Mono',size:11},color:'#15130e'}}},
+      scales:isScale?{y:{beginAtZero:true,ticks:{precision:0,color:'#6f6657'}},x:{ticks:{color:'#15130e'}}}:{}
+    }
+  });
+}
+
+// ---------- helpers ----------
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function saveCfg(){
+  SPREADSHEET_ID=extractSheetId($('#cfgSheetLink').value);
+  SHEET_NAME=$('#cfgSheetName').value.trim();
+  localStorage_set('pulse_sheet_id',SPREADSHEET_ID);
+  localStorage_set('pulse_sheet_name',SHEET_NAME);
+  applyConfig();
+  if($('#cfgSheetName')) $('#cfgSheetName').value=SHEET_NAME;
+  answers={}; loadQuestions();
+}
+
+// True when responses should be saved to / read from Firestore.
+function usingDB(){ return !!FIRESTORE_COLLECTION; }
+// The Firebase bridge loads as a deferred module; wait briefly for it on first use.
+function fbWait(ms){
+  ms=ms||5000;
+  return new Promise(res=>{
+    if(window.__fb) return res(window.__fb);
+    const start=Date.now();
+    const iv=setInterval(()=>{
+      if(window.__fb||Date.now()-start>ms){ clearInterval(iv); res(window.__fb||null); }
+    },50);
+  });
+}
+
+// in-memory shim (artifact sandboxes block localStorage)
+const _mem={};
+function localStorage_get(k){try{return localStorage.getItem(k)}catch(e){return _mem[k]||''}}
+function localStorage_set(k,v){try{localStorage.setItem(k,v)}catch(e){_mem[k]=v}}
+function localStorage_has(k){try{return localStorage.getItem(k)!==null}catch(e){return Object.prototype.hasOwnProperty.call(_mem,k)}}
+</script>
