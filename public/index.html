@@ -8,8 +8,10 @@
   // Firebase modular SDK, loaded from the CDN so it works in a plain static page (no bundler).
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
   import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
-  import { getFirestore, collection, addDoc, getDocs, serverTimestamp }
+  import { getFirestore, collection, doc, getDoc, getDocs, setDoc, serverTimestamp }
     from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
   // Your web app's Firebase configuration
   const firebaseConfig = {
@@ -26,12 +28,34 @@
   const app = initializeApp(firebaseConfig);
   try { getAnalytics(app); } catch (e) { /* analytics only reports on authorized https domains */ }
   const db = getFirestore(app);
+  const auth = getAuth(app);
 
-  // Bridge so the (non-module) survey script below can read/write Firestore.
+  // Give each browser a persistent anonymous identity so we can enforce one
+  // response per user. Resolves to the uid, or null if Anonymous auth is off.
+  const authReady = new Promise((resolve) => {
+    let done = false;
+    onAuthStateChanged(auth, (user) => { if (user && !done) { done = true; resolve(user.uid); } });
+    signInAnonymously(auth).catch((e) => { console.error('Anonymous sign-in failed:', e && e.code); });
+    setTimeout(() => { if (!done) { done = true; resolve(null); } }, 8000);
+  });
+
+  // Bridge so the (non-module) survey script below can use Auth + Firestore.
   window.__fb = {
-    // Save one submission as a NEW document in the given collection.
+    // Current anonymous uid (waits for sign-in; null if Anonymous auth is disabled).
+    uid(){ return authReady; },
+    // Has THIS identity already submitted to this collection?
+    async hasSubmitted(coll){
+      const uid = await authReady;
+      if (!uid) return false;
+      const snap = await getDoc(doc(db, coll, uid));
+      return snap.exists();
+    },
+    // Save the user's single response: document id = uid, so a second submit is
+    // an update — which the security rules forbid (one response per identity).
     async saveResponse(coll, answers){
-      await addDoc(collection(db, coll), { answers, createdAt: serverTimestamp() });
+      const uid = await authReady;
+      if (!uid) throw new Error('anonymous sign-in unavailable — enable Anonymous auth in Firebase');
+      await setDoc(doc(db, coll, uid), { answers, createdAt: serverTimestamp(), uid });
     },
     // Read every submission's answers from the given collection.
     async loadResponses(coll){
@@ -226,7 +250,7 @@ let LOCAL_RESPONSES = [
   {"1":["Job prospects / career opportunities","Other (please specify): ___"],"1__other":"It was the closest program to my hometown"},
 ];
 
-let QUESTIONS=[], answers={}, demoMode=true, canSave=false, charts=[];
+let QUESTIONS=[], answers={}, demoMode=true, canSave=false, charts=[], alreadySubmitted=false, currentTab='take';
 
 const $=s=>document.querySelector(s);
 const view=$('#view');
@@ -243,7 +267,7 @@ async function loadQuestions(){
   canSave = !!APPS_SCRIPT_URL;
   demoMode = !SPREADSHEET_ID;
   if(demoMode){
-    QUESTIONS=DEMO_QUESTIONS; FIRESTORE_COLLECTION='';
+    QUESTIONS=DEMO_QUESTIONS; FIRESTORE_COLLECTION=''; alreadySubmitted=false;
     $('#srcTag').textContent="demo data";
     if($('#sheetNameOut')) $('#sheetNameOut').textContent='';
     renderTake(); return;
@@ -262,7 +286,9 @@ async function loadQuestions(){
     const text=await r.text();
     QUESTIONS=parseQuestionsCSV(text);
     if(!QUESTIONS.length) throw new Error('no questions parsed from that tab');
+    alreadySubmitted=false;
     renderTake();
+    checkAlreadySubmitted();   // async: may swap to the "already responded" view
   }catch(e){
     view.innerHTML='<div class="banner err">Could not load the sheet — '+esc(e.message||'check the link, index, and sharing')+'.</div>';
     demoMode=true; QUESTIONS=DEMO_QUESTIONS; FIRESTORE_COLLECTION='';
@@ -335,13 +361,36 @@ function parseCSV(text){
 }
 
 function show(which){
+  currentTab=which;
   $('#tabTake').classList.toggle('active',which==='take');
   $('#tabResults').classList.toggle('active',which==='results');
   which==='take'?renderTake():renderResults();
 }
 
+// One response per anonymous identity: check the database and, if this user has
+// already submitted to the current collection, switch to the "responded" view.
+async function checkAlreadySubmitted(){
+  if(!usingDB()) return;
+  try{
+    const fb=await fbWait(); if(!fb) return;
+    if(await fb.hasSubmitted(FIRESTORE_COLLECTION)){
+      alreadySubmitted=true;
+      if(currentTab==='take') renderTake();
+    }
+  }catch(e){ /* dedup is best-effort on read; ignore lookup errors */ }
+}
+
 // ---------- TAKE ----------
 function renderTake(){
+  if(alreadySubmitted){
+    view.innerHTML=`<div class="center">
+      <div class="bignum">✓</div>
+      <div class="big">You've already responded</div>
+      <p class="sub">Thanks! This survey accepts one response per person.</p>
+      <button class="btn ghost" onclick="show('results')">See the results →</button>
+    </div>`;
+    return;
+  }
   let html=`<h1>Tell us what you think.</h1>
     <p class="sub">${QUESTIONS.length} questions · ~2 min${demoMode?' · running on demo data':''}</p>`;
   QUESTIONS.forEach((q,i)=>{
@@ -421,14 +470,19 @@ async function submit(){
     }
     LOCAL_RESPONSES.push(payload); // also keep locally for instant results view
   }catch(e){
-    $('#msg').innerHTML='<div class="banner err">Save failed — '+esc(e.message||'check your database settings and Firestore rules')+'.</div>';
+    const emsg=(e&&e.message)||'';
+    if(/permission|already|exist|denied/i.test(emsg)){
+      // Backstop: the rules rejected an overwrite => this identity already submitted.
+      alreadySubmitted=true; answers={}; renderTake(); return;
+    }
+    $('#msg').innerHTML='<div class="banner err">Save failed — '+esc(emsg||'check your database settings and Firestore rules')+'.</div>';
     btn.textContent='Submit response →'; btn.disabled=false; return;
   }
-  answers={};
+  alreadySubmitted=true; answers={};
   view.innerHTML=`<div class="center">
     <div class="bignum">✓</div>
     <div class="big">Thanks!</div>
-    <p class="sub">Your response was recorded${savedTo}.</p>
+    <p class="sub">Your response was recorded${savedTo}. One response per person.</p>
     <button class="btn ghost" onclick="show('results')">See the results →</button>
   </div>`;
 }

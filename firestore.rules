@@ -1,11 +1,13 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Public survey: anyone may read aggregated responses and add a new one.
-    // Existing records cannot be edited or deleted from the client.
+    // Public survey, one response per anonymous identity.
+    //  - the document id must equal the submitter's uid (so each user owns exactly one doc),
+    //  - responses cannot be edited or deleted from the client,
+    //  - anyone may read the aggregated results.
     match /{collection}/{docId} {
       allow read: if true;
-      allow create: if true;
+      allow create: if request.auth != null && request.auth.uid == docId;
       allow update, delete: if false;
     }
   }
