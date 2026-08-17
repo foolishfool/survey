@@ -1,13 +1,28 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Public survey, one response per anonymous identity.
-    //  - the document id must equal the submitter's uid (so each user owns exactly one doc),
+    // Round metadata: one doc per response collection ("round"), doc id = that
+    // collection's name. Written by the app's admin panel. The admin gate is
+    // client-side only, so any signed-in (anonymous) user *could* write here;
+    // acceptable for a public classroom survey, but see the README note.
+    match /_surveys/{roundId} {
+      allow read: if true;
+      allow create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // Survey responses.
+    //  - a collection only accepts responses while its round is OPEN
+    //    (its "_surveys/<collection>" doc exists with status == 'open'),
+    //  - the document id must equal the submitter's uid (one response each),
     //  - responses cannot be edited or deleted from the client,
     //  - anyone may read the aggregated results.
     match /{collection}/{docId} {
       allow read: if true;
-      allow create: if request.auth != null && request.auth.uid == docId;
+      allow create: if request.auth != null
+                    && request.auth.uid == docId
+                    && exists(/databases/$(database)/documents/_surveys/$(collection))
+                    && get(/databases/$(database)/documents/_surveys/$(collection)).data.status == 'open';
       allow update, delete: if false;
     }
   }

@@ -8,7 +8,7 @@
   // Firebase modular SDK, loaded from the CDN so it works in a plain static page (no bundler).
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
   import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
-  import { getFirestore, collection, doc, getDoc, getDocs, setDoc, serverTimestamp }
+  import { getFirestore, collection, doc, getDoc, getDocs, setDoc, serverTimestamp, query, where }
     from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
   import { getAuth, signInAnonymously, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -63,6 +63,43 @@
       const out = [];
       snap.forEach(d => { const v = d.data(); out.push(v && v.answers ? v.answers : {}); });
       return out;
+    },
+    // ---- Survey rounds ----
+    // Each "round" of a survey stores its responses in its own collection.
+    // The "_surveys" collection holds one meta document per round (doc id =
+    // the round's collection name): { base, status: 'open'|'closed',
+    // openedAt, closedAt, responseCount }.
+    async listRuns(base){
+      const snap = await getDocs(query(collection(db, '_surveys'), where('base', '==', base)));
+      const out = [];
+      snap.forEach(d => {
+        const v = d.data() || {};
+        out.push({
+          id: d.id,
+          status: v.status === 'open' ? 'open' : 'closed',
+          openedAt: (v.openedAt && v.openedAt.toMillis) ? v.openedAt.toMillis() : null,
+          closedAt: (v.closedAt && v.closedAt.toMillis) ? v.closedAt.toMillis() : null,
+          responseCount: (typeof v.responseCount === 'number') ? v.responseCount : null
+        });
+      });
+      return out;
+    },
+    async getRunMeta(collName){
+      const snap = await getDoc(doc(db, '_surveys', collName));
+      return snap.exists() ? snap.data() : null;
+    },
+    async countResponses(coll){
+      const snap = await getDocs(collection(db, coll));
+      return snap.size;
+    },
+    async openRun(collName, base){
+      await setDoc(doc(db, '_surveys', collName),
+        { base, status: 'open', openedAt: serverTimestamp() }, { merge: true });
+    },
+    async closeRun(collName, base, count){
+      await setDoc(doc(db, '_surveys', collName),
+        { base, status: 'closed', closedAt: serverTimestamp(),
+          responseCount: (count == null ? null : count) }, { merge: true });
     }
   };
 </script>
@@ -137,6 +174,8 @@
   .field{margin-bottom:16px}
   .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
   .field input{width:100%;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;background:#fff8;color:var(--ink)}
+  .field select{width:100%;padding:11px 13px;border:1.5px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;background:#fff8;color:var(--ink);cursor:pointer}
+  .field select:focus{outline:2px solid var(--accent2);outline-offset:1px}
 
   .res-q{font-family:'Fraunces',serif;font-weight:600;font-size:18px;margin:0 0 4px}
   .res-meta{font-size:11px;color:var(--muted);margin-bottom:14px;text-transform:uppercase;letter-spacing:.5px}
@@ -247,6 +286,17 @@ let LOCAL_RESPONSES = [
 
 let QUESTIONS=[], answers={}, demoMode=true, canSave=false, charts=[], alreadySubmitted=false, currentTab='take';
 
+// ---- Survey rounds ----
+// A survey can be run in "rounds": the admin begins a round (responses save to a
+// fresh, dated collection) and later closes it (submissions stop; the collection
+// is kept as that round's archive). The "_surveys" collection tracks the rounds.
+let SURVEY_BASE = "";         // sanitized sheet/tab name — groups rounds of the same survey
+let SURVEY_RUNS = [];         // round meta docs for SURVEY_BASE (newest first)
+let ACTIVE_RUN = null;        // the currently open round, or null (survey closed)
+let RESULTS_COLLECTION = "";  // the round collection the Results tab is showing
+let RUNS_ERROR = false;       // true when the round lookup itself failed
+let confirmingClose = false;  // two-step confirm for the Close-survey button
+
 const $=s=>document.querySelector(s);
 const view=$('#view');
 
@@ -262,6 +312,7 @@ async function loadQuestions(){
   demoMode = !SPREADSHEET_ID;
   if(demoMode){
     QUESTIONS=DEMO_QUESTIONS; FIRESTORE_COLLECTION=''; alreadySubmitted=false;
+    SURVEY_BASE=''; SURVEY_RUNS=[]; ACTIVE_RUN=null; RESULTS_COLLECTION='';
     $('#srcTag').textContent="demo data";
     if($('#sheetNameOut')) $('#sheetNameOut').textContent='';
     renderTake(); return;
@@ -270,25 +321,48 @@ async function loadQuestions(){
   try{
     const meta=await resolveSheet(SPREADSHEET_ID,SHEET_INDEX);          // index -> real tab name + gid
     SHEET_NAME=meta.title;
-    FIRESTORE_COLLECTION=sanitizeCollection(SHEET_NAME);
+    SURVEY_BASE=sanitizeCollection(SHEET_NAME);
     QUESTIONS_CSV_URL="https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/export?format=csv&gid="+meta.gid;
     LOCAL_RESPONSES=[];
-    $('#srcTag').textContent="live · "+SHEET_NAME;
-    if($('#sheetNameOut')) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' of '+meta.total+' → <b>'+esc(SHEET_NAME)+'</b><br>Responses saved to collection: <b>'+esc(FIRESTORE_COLLECTION)+'</b>';
+    await refreshRuns();    // sets FIRESTORE_COLLECTION to the open round ('' = closed)
+    updateSrcTag();
     const r=await fetch(QUESTIONS_CSV_URL);
     if(!r.ok) throw new Error('questions CSV HTTP '+r.status);
     const text=await r.text();
     QUESTIONS=parseQuestionsCSV(text);
     if(!QUESTIONS.length) throw new Error('no questions parsed from that tab');
     alreadySubmitted=false;
+    renderAdminPanel();     // refresh sheet info + round controls in the settings panel
     renderTake();
     checkAlreadySubmitted();   // async: may swap to the "already responded" view
   }catch(e){
     view.innerHTML='<div class="banner err">Could not load the sheet — '+esc(e.message||'check the link, index, and sharing')+'.</div>';
     demoMode=true; QUESTIONS=DEMO_QUESTIONS; FIRESTORE_COLLECTION='';
+    SURVEY_BASE=''; SURVEY_RUNS=[]; ACTIVE_RUN=null; RESULTS_COLLECTION='';
     $('#srcTag').textContent="demo data";
+    renderAdminPanel();
     setTimeout(renderTake,2000);
   }
+}
+
+// Fetch the round list for the current survey and derive the open round.
+async function refreshRuns(){
+  SURVEY_RUNS=[]; ACTIVE_RUN=null; FIRESTORE_COLLECTION=''; RUNS_ERROR=false;
+  if(!SURVEY_BASE) return;
+  try{
+    const fb=await fbWait();
+    if(!fb) throw new Error('Firebase not ready');
+    SURVEY_RUNS=await fb.listRuns(SURVEY_BASE);
+    SURVEY_RUNS.sort((a,b)=>((b.openedAt||b.closedAt||0)-(a.openedAt||a.closedAt||0)));
+    ACTIVE_RUN=SURVEY_RUNS.find(r=>r.status==='open')||null;
+    FIRESTORE_COLLECTION=ACTIVE_RUN?ACTIVE_RUN.id:'';
+  }catch(e){ RUNS_ERROR=true; console.error('survey round lookup failed:', e); }
+}
+
+function updateSrcTag(){
+  const el=$('#srcTag'); if(!el) return;
+  if(demoMode||!SHEET_NAME){ el.textContent='demo data'; return; }
+  el.textContent='live · '+SHEET_NAME+(ACTIVE_RUN?' · open':' · closed');
 }
 
 // Parse a Google Sheet CSV into question objects. Supports two layouts:
@@ -376,6 +450,22 @@ async function checkAlreadySubmitted(){
 
 // ---------- TAKE ----------
 function renderTake(){
+  if(!demoMode && SURVEY_BASE && !ACTIVE_RUN){
+    // No open round: the survey only accepts responses after the admin
+    // presses "Begin survey" in the settings panel.
+    const sub = RUNS_ERROR
+      ? 'Could not check the survey status — please reload the page.'
+      : (SURVEY_RUNS.length
+          ? 'This survey is closed and not accepting responses right now.'
+          : 'This survey hasn\'t started yet. Please check back later.');
+    view.innerHTML=`<div class="center">
+      <div class="bignum">◦</div>
+      <div class="big">Survey closed</div>
+      <p class="sub">${esc(sub)}</p>
+      ${SURVEY_RUNS.length?'<button class="btn ghost" onclick="show(\'results\')">See the results →</button>':''}
+    </div>`;
+    return;
+  }
   if(alreadySubmitted){
     view.innerHTML=`<div class="center">
       <div class="bignum">✓</div>
@@ -445,6 +535,13 @@ async function submit(){
 
   const btn=document.querySelector('.btn'); btn.textContent='Saving…'; btn.disabled=true;
 
+  // If the admin closed the survey while this form was open, don't accept the answer.
+  if(!demoMode && SURVEY_BASE){
+    try{ await refreshRuns(); }catch(_){}
+    updateSrcTag();
+    if(!ACTIVE_RUN){ renderTake(); return; }
+  }
+
   const payload={...answers};
   let savedTo=' (this browser only)';
   try{
@@ -466,7 +563,11 @@ async function submit(){
   }catch(e){
     const emsg=(e&&e.message)||'';
     if(/permission|already|exist|denied/i.test(emsg)){
-      // Backstop: the rules rejected an overwrite => this identity already submitted.
+      // The rules rejected the write: either the round was just closed, or
+      // this identity already submitted (overwrites are forbidden).
+      try{ await refreshRuns(); }catch(_){}
+      updateSrcTag();
+      if(!ACTIVE_RUN){ answers={}; renderTake(); return; }
       alreadySubmitted=true; answers={}; renderTake(); return;
     }
     $('#msg').innerHTML='<div class="banner err">Save failed — '+esc(emsg||'check your database settings and Firestore rules')+'.</div>';
@@ -485,12 +586,22 @@ async function submit(){
 async function renderResults(){
   charts.forEach(c=>c.destroy()); charts=[];
   view.innerHTML='<div class="spin"></div>';
-  let responses=[];
-  if(usingDB()){
+  const live=!demoMode&&!!SURVEY_BASE;
+  let responses=[], rounds=[];
+  if(live){
     try{
       const fb=await fbWait();
       if(!fb) throw new Error('Firebase not ready');
-      responses=await fb.loadResponses(FIRESTORE_COLLECTION); // read straight from the database
+      await refreshRuns();                 // pick up rounds opened/closed elsewhere
+      updateSrcTag();
+      rounds=SURVEY_RUNS.slice();
+      // Before any round exists, responses live in the plain "{base}" collection.
+      if(!rounds.length) rounds=[{id:SURVEY_BASE,status:'open',legacy:true}];
+      if(!RESULTS_COLLECTION||!rounds.some(r=>r.id===RESULTS_COLLECTION)){
+        const open=rounds.find(r=>r.status==='open');
+        RESULTS_COLLECTION=(open||rounds[0]).id;   // default: open round, else newest
+      }
+      responses=await fb.loadResponses(RESULTS_COLLECTION); // read straight from the database
     }catch(e){
       view.innerHTML='<div class="banner err">Could not read from the database — '+esc(e.message||'check your Firestore rules')+'.</div>';
       return;
@@ -501,12 +612,25 @@ async function renderResults(){
   }else{
     responses=LOCAL_RESPONSES.slice();
   }
-  if(!responses.length){ view.innerHTML='<div class="center"><div class="big">No responses yet</div><p class="sub">Be the first to take it.</p></div>'; return; }
+  if(!live&&!responses.length){ view.innerHTML='<div class="center"><div class="big">No responses yet</div><p class="sub">Be the first to take it.</p></div>'; return; }
 
-  let html=`<h1>The results.</h1><p class="sub">${responses.length} response${responses.length>1?'s':''} so far</p>`;
+  let html=`<h1>The results.</h1>`;
+  if(live&&rounds.length>1){
+    html+=`<div class="field" style="max-width:460px"><label>Survey round — pick which results to show</label>
+      <select id="roundSel" onchange="pickRound(this.value)">`
+      +rounds.map(r=>`<option value="${esc(r.id)}"${r.id===RESULTS_COLLECTION?' selected':''}>${esc(roundLabel(r))}</option>`).join('')
+      +`</select></div>`;
+  }
+  const sel=rounds.find(r=>r.id===RESULTS_COLLECTION);
+  html+=`<p class="sub">${responses.length} response${responses.length===1?'':'s'}${live&&sel?' · '+esc(roundLabel(sel)):' so far'}</p>`;
   if(demoMode) html+=`<div class="banner demo">Demo mode — add your Questions CSV link to go live.</div>`;
-  else if(usingDB()) html+=`<div class="banner demo">Live results from the “${esc(FIRESTORE_COLLECTION)}” collection in Firestore.</div>`;
+  else if(live) html+=`<div class="banner demo">Live results from the “${esc(RESULTS_COLLECTION)}” collection in Firestore.</div>`;
   else if(!canSave) html+=`<div class="banner demo">Reading questions from your sheet. Responses are kept in this browser only — set a Firestore collection to save them to the database.</div>`;
+  if(live&&!responses.length){
+    html+='<div class="center"><div class="big">No responses yet</div><p class="sub">'
+      +(sel&&sel.status==='open'?'Be the first to take it.':'This round recorded no responses.')+'</p></div>';
+    view.innerHTML=html; return;
+  }
   view.innerHTML=html;
 
   QUESTIONS.forEach(q=>{
@@ -599,10 +723,12 @@ function renderAdminPanel(){
       <div class="field"><label>Sheet index (0 = first tab)</label><input id="cfgSheetIndex" type="number" min="0" step="1" placeholder="0"></div>
       <button class="btn ghost" onclick="saveCfg()">Save settings</button>
       <p id="sheetNameOut" style="margin-top:12px"></p>
+      <div id="roundBox" style="margin-top:14px"></div>
       <p style="margin-top:8px">Share the spreadsheet as <b>Anyone with the link → Viewer</b>. First row = headers (<code>ID, Type, Question, Option1, …</code>); each following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>`;
     if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
     if($('#cfgSheetIndex')) $('#cfgSheetIndex').value = SHEET_INDEX;
-    if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b> (collection: <b>'+esc(FIRESTORE_COLLECTION)+'</b>)';
+    if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b> — round collections are named <b>'+esc(SURVEY_BASE)+'__&lt;date&gt;</b>';
+    renderRoundBox();
   }else{
     body.innerHTML=`
       <p>These settings are restricted to the survey administrator. Please log in.</p>
@@ -612,6 +738,109 @@ function renderAdminPanel(){
       <button class="btn ghost" onclick="adminLogin()">Log in</button>`;
   }
 }
+
+// ---------- SURVEY ROUNDS (admin) ----------
+// Renders the open/close controls inside the admin settings panel.
+function renderRoundBox(){
+  const box=$('#roundBox'); if(!box) return;
+  if(!isAdmin()||demoMode||!SURVEY_BASE){ box.innerHTML=''; return; }
+  let html='<div class="card" style="margin:0"><div class="res-meta">Survey status</div>';
+  if(RUNS_ERROR){
+    html+='<p style="margin:0 0 12px">Could not check the survey status — reload the page and try again.</p>';
+  }else if(ACTIVE_RUN){
+    html+='<p style="margin:0 0 12px"><b style="color:var(--accent2)">Open</b>'
+      +(ACTIVE_RUN.openedAt?' since '+esc(fmtDate(ACTIVE_RUN.openedAt)):'')
+      +' — responses are saving to collection <b>'+esc(ACTIVE_RUN.id)+'</b>.</p>';
+    if(confirmingClose){
+      html+='<p style="margin:0 0 12px">Close this survey? Submissions stop immediately. The responses stay saved in the <b>'
+        +esc(ACTIVE_RUN.id)+'</b> collection and remain selectable in Results.</p>'
+        +'<button class="btn" onclick="closeSurvey()">Yes, close survey</button> '
+        +'<button class="btn ghost" onclick="confirmingClose=false;renderRoundBox()" style="margin-left:8px">Cancel</button>';
+    }else{
+      html+='<button class="btn" onclick="confirmingClose=true;renderRoundBox()">Close survey</button>';
+    }
+  }else{
+    html+='<p style="margin:0 0 12px"><b style="color:var(--accent)">Closed</b> — the survey can\'t be submitted until you begin a new round.'
+      +(SURVEY_RUNS.length?' Past rounds stay selectable in Results.':'')+'</p>'
+      +'<button class="btn" onclick="beginSurvey()">Begin survey</button>';
+  }
+  html+='<p id="roundMsg" class="banner err" style="display:none;margin:12px 0 0"></p></div>';
+  box.innerHTML=html;
+}
+
+// Begin a new round: responses start saving to a fresh, dated collection.
+async function beginSurvey(){
+  try{
+    roundBusy('Starting…');
+    const fb=await fbWait();
+    if(!fb) throw new Error('Firebase not ready');
+    if(await fb.uid()==null) throw new Error('anonymous sign-in unavailable — enable Anonymous auth in Firebase');
+    // First time using rounds: if the old plain collection already has
+    // responses, register it as a closed round so that data stays visible.
+    if(!SURVEY_RUNS.length){
+      let n=0; try{ n=await fb.countResponses(SURVEY_BASE); }catch(_){}
+      if(n>0) await fb.closeRun(SURVEY_BASE, SURVEY_BASE, n);
+    }
+    // e.g. Sheet1__2026-08-17_143205; never reuse an existing round's collection
+    const stamp=runStamp();
+    let name=SURVEY_BASE+'__'+stamp, k=2;
+    while(SURVEY_RUNS.some(r=>r.id===name)) name=SURVEY_BASE+'__'+stamp+'-'+(k++);
+    await fb.openRun(name, SURVEY_BASE);
+    await refreshRuns();
+    alreadySubmitted=false; answers={}; RESULTS_COLLECTION=name; confirmingClose=false;
+    updateSrcTag(); renderRoundBox();
+    currentTab==='take'?renderTake():renderResults();
+    checkAlreadySubmitted();   // this admin may have answered an earlier round; re-check for the new one
+  }catch(e){ renderRoundBox(); roundErr('Could not begin the survey — '+((e&&e.message)||'unknown error')); }
+}
+
+// Close the current round: submissions stop; its collection is the archive.
+async function closeSurvey(){
+  try{
+    roundBusy('Closing…');
+    const fb=await fbWait();
+    if(!fb||!ACTIVE_RUN) throw new Error('Firebase not ready');
+    const id=ACTIVE_RUN.id;
+    let n=null; try{ n=await fb.countResponses(id); }catch(_){}
+    await fb.closeRun(id, SURVEY_BASE, n);
+    confirmingClose=false;
+    await refreshRuns();
+    RESULTS_COLLECTION=id;    // Results opens on the round that was just closed
+    updateSrcTag(); renderRoundBox();
+    currentTab==='take'?renderTake():renderResults();
+  }catch(e){ renderRoundBox(); roundErr('Could not close the survey — '+((e&&e.message)||'unknown error')); }
+}
+
+function roundErr(msg){ const m=$('#roundMsg'); if(m){ m.textContent=msg; m.style.display='block'; } }
+function roundBusy(label){
+  const box=$('#roundBox'); if(!box) return;
+  box.querySelectorAll('button').forEach(b=>{ b.disabled=true; });
+  const m=$('#roundMsg'); if(m){ m.textContent=label; m.style.display='block'; }
+}
+
+// "Sheet1__2026-08-17_143205" — local date/time stamp used in round collection names.
+function runStamp(){
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());
+}
+
+function fmtDate(ms){
+  if(!ms) return '';
+  const d=new Date(ms);
+  return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'})
+    +', '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+
+// Human label for a round in the Results dropdown.
+function roundLabel(r){
+  if(r.legacy) return r.id+' — all responses';
+  if(r.status==='open') return 'Current round — open'+(r.openedAt?' since '+fmtDate(r.openedAt):'');
+  let l='Closed '+(r.closedAt?fmtDate(r.closedAt):'(date unknown)');
+  if(r.responseCount!=null) l+=' · '+r.responseCount+' response'+(r.responseCount===1?'':'s');
+  return l;
+}
+
+function pickRound(id){ RESULTS_COLLECTION=id; renderResults(); }
 
 function saveCfg(){
   SPREADSHEET_ID=extractSheetId($('#cfgSheetLink').value);
