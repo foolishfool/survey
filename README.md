@@ -36,19 +36,23 @@ past rounds stay selectable (by date) in the Results tab.
 - **Responses** are written as one document per submission
   (`{ answers, createdAt, uid }`, doc id = anonymous uid → one response per
   person *per round*) in the open round's collection.
-- **Results** has a **round selector** — pick any round (labelled by date) and
-  it reads every document in that round's collection and charts it. Note that
-  charts always use the *current* sheet questions; if you change the questions
-  between rounds, old rounds render against the new question list.
+- **Results** are **admin-only**: the Results tab appears only after logging in
+  under *Survey settings*. It has a **round selector** — pick any round
+  (labelled by date) and it reads every document in that round's collection and
+  charts it. Note that charts always use the *current* sheet questions; if you
+  change the questions between rounds, old rounds render against the new
+  question list.
 
 ## Security note
 
 The admin login is client-side (SHA-256 password gate) — presentation only.
-The Firestore rules therefore allow *any* signed-in anonymous user to write
-`_surveys` docs, meaning a determined visitor could open/close rounds via the
-API. Responses themselves stay protected (no edits/deletes, one per uid). If
-that matters, add real Firebase Auth for the admin and restrict `_surveys`
-writes to that uid in the rules.
+That gate is what hides the Results tab: the *page* won't show results to
+non-admins, but the underlying data stays publicly readable in Firestore
+(`allow read: if true`), so a determined visitor could still fetch raw
+responses — or open/close rounds — via the API. Responses themselves can't be
+edited or deleted (one per uid). If stronger protection matters, add real
+Firebase Auth for the admin, restrict reads and `_surveys` writes to that uid
+in the rules, and aggregate results server-side.
 
 ## Project layout
 

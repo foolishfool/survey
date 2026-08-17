@@ -205,7 +205,7 @@
 
   <div class="tabs">
     <button id="tabTake" class="active" onclick="show('take')">Take survey</button>
-    <button id="tabResults" onclick="show('results')">Results</button>
+    <button id="tabResults" onclick="show('results')" style="display:none">Results</button>
   </div>
 
   <div id="view"></div>
@@ -303,9 +303,19 @@ const view=$('#view');
 (function init(){
   const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
   if(localStorage_has('pulse_sheet_index')) SHEET_INDEX=parseInt(localStorage_get('pulse_sheet_index'),10)||0;
+  updateTabsVisibility();   // Results tab is admin-only
   renderAdminPanel();   // builds the settings panel (login form, or the controls if already admin)
   loadQuestions();
 })();
+
+// Results are restricted to the admin: the tab only shows when logged in.
+function updateTabsVisibility(){
+  const t=$('#tabResults'); if(t) t.style.display=isAdmin()?'':'none';
+}
+// "See the results →" buttons render only for the admin.
+function resultsBtn(){
+  return isAdmin()?'<button class="btn ghost" onclick="show(\'results\')">See the results →</button>':'';
+}
 
 async function loadQuestions(){
   canSave = !!APPS_SCRIPT_URL;
@@ -462,7 +472,7 @@ function renderTake(){
       <div class="bignum">◦</div>
       <div class="big">Survey closed</div>
       <p class="sub">${esc(sub)}</p>
-      ${SURVEY_RUNS.length?'<button class="btn ghost" onclick="show(\'results\')">See the results →</button>':''}
+      ${SURVEY_RUNS.length?resultsBtn():''}
     </div>`;
     return;
   }
@@ -471,7 +481,7 @@ function renderTake(){
       <div class="bignum">✓</div>
       <div class="big">You've already responded</div>
       <p class="sub">Thanks! This survey accepts one response per person.</p>
-      <button class="btn ghost" onclick="show('results')">See the results →</button>
+      ${resultsBtn()}
     </div>`;
     return;
   }
@@ -578,13 +588,23 @@ async function submit(){
     <div class="bignum">✓</div>
     <div class="big">Thanks!</div>
     <p class="sub">Your response was recorded${savedTo}. One response per person.</p>
-    <button class="btn ghost" onclick="show('results')">See the results →</button>
+    ${resultsBtn()}
   </div>`;
 }
 
 // ---------- RESULTS ----------
 async function renderResults(){
   charts.forEach(c=>c.destroy()); charts=[];
+  if(!isAdmin()){
+    // Presentation-level gate (like the settings panel): results are shown
+    // to the logged-in admin only.
+    view.innerHTML=`<div class="center">
+      <div class="bignum">●</div>
+      <div class="big">Results are admin-only</div>
+      <p class="sub">Log in under <b>Survey settings</b> (bottom of the page) to view the results.</p>
+    </div>`;
+    return;
+  }
   view.innerHTML='<div class="spin"></div>';
   const live=!demoMode&&!!SURVEY_BASE;
   let responses=[], rounds=[];
@@ -706,11 +726,19 @@ async function adminLogin(){
   const p=$('#admPass')?$('#admPass').value:'';
   let ok=false;
   try{ ok = (u===ADMIN_USER) && (await sha256Hex(p))===ADMIN_PASS_SHA256; }catch(e){}
-  if(ok){ localStorage_set('pulse_admin','1'); renderAdminPanel(); }
+  if(ok){
+    localStorage_set('pulse_admin','1');
+    renderAdminPanel(); updateTabsVisibility();
+    if(currentTab==='results') renderResults();   // swap the "admin-only" notice for the charts
+  }
   else{ const m=$('#admMsg'); if(m){ m.textContent='Wrong username or password.'; m.style.display='block'; } }
 }
 
-function adminLogout(){ localStorage_set('pulse_admin',''); renderAdminPanel(); }
+function adminLogout(){
+  localStorage_set('pulse_admin','');
+  renderAdminPanel(); updateTabsVisibility();
+  if(currentTab==='results') show('take');        // results are admin-only
+}
 
 // Render either the admin login form or the settings controls into #settingsBody.
 function renderAdminPanel(){
