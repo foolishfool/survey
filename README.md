@@ -12,16 +12,27 @@ past rounds stay selectable (by date) in the Results tab.
 ## How it works
 
 - **Questions** come from a Google Spreadsheet. In the page's *Survey settings*
-  panel you set the spreadsheet link and a **sheet index** (0 = first tab). The
-  tab's name is looked up at runtime and used as the survey's *base name*.
-  - Sheet layout: first row is the headers `ID, Type, Question, Option1, Option2, …`;
-    every following row is one question.
-  - `Type` can be `Single-Choise`, `Multi-Choise`, `scale`, or `text`.
+  panel you set the spreadsheet link, a **sheet index** (0 = first tab), and a
+  **class**. The tab's name is looked up at runtime; tab name + class form the
+  survey's *base name* (each class is its own survey with its own rounds).
+  - Sheet layout: first row is the headers
+    `ID, Class, Type, Question, Option1, Option2, …`; every following row is
+    one question.
+  - `Class` (2nd column) tags the row: only rows whose Class matches the
+    admin-set class are used (case-insensitive). Leave the class setting empty
+    to use all rows.
+  - `Type` can be `Single-Choise`, `Multi-Choise`, `scale`, `text`, or
+    `Short Answer N` (N = 1, 2, 3, …): shows N one-line text inputs, each
+    labelled by the corresponding `Option` column of that row, with a
+    100-character limit per field. All fields are required; the answers are
+    stored as a list and shown per-field in the Results tab.
   - The spreadsheet must be shared as **Anyone with the link → Viewer**.
 - **Rounds** — the survey only accepts responses while a round is open:
   - The admin presses **Begin survey** (settings panel) to open a round. Each
-    round writes to its own collection named `<base>__<YYYY-MM-DD_HHMM>`
-    (e.g. `Sheet1__2026-08-17_1432`).
+    round writes to its own collection named
+    `<YYYY-MM-DD_HHMMSS>_<sheet tab name>_<class>`
+    (e.g. `2026-08-17_143205_DSA213 Game Programming Studio_class1`); the
+    Results dropdown shows that name plus the close date and response count.
   - **Close survey** stops submissions immediately. The round's collection is
     kept as-is — that *is* the archive — and its meta doc records the close
     date and response count.

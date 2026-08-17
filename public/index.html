@@ -79,7 +79,9 @@
           status: v.status === 'open' ? 'open' : 'closed',
           openedAt: (v.openedAt && v.openedAt.toMillis) ? v.openedAt.toMillis() : null,
           closedAt: (v.closedAt && v.closedAt.toMillis) ? v.closedAt.toMillis() : null,
-          responseCount: (typeof v.responseCount === 'number') ? v.responseCount : null
+          responseCount: (typeof v.responseCount === 'number') ? v.responseCount : null,
+          sheetName: v.sheetName || null,
+          class: v.class || null
         });
       });
       return out;
@@ -92,14 +94,16 @@
       const snap = await getDocs(collection(db, coll));
       return snap.size;
     },
-    async openRun(collName, base){
+    async openRun(collName, meta){
       await setDoc(doc(db, '_surveys', collName),
-        { base, status: 'open', openedAt: serverTimestamp() }, { merge: true });
+        { base: meta.base, sheetName: meta.sheetName || null, class: meta.class || null,
+          status: 'open', openedAt: serverTimestamp() }, { merge: true });
     },
-    async closeRun(collName, base, count){
+    async closeRun(collName, meta){
       await setDoc(doc(db, '_surveys', collName),
-        { base, status: 'closed', closedAt: serverTimestamp(),
-          responseCount: (count == null ? null : count) }, { merge: true });
+        { base: meta.base, sheetName: meta.sheetName || null, class: meta.class || null,
+          status: 'closed', closedAt: serverTimestamp(),
+          responseCount: (meta.count == null ? null : meta.count) }, { merge: true });
     }
   };
 </script>
@@ -224,6 +228,7 @@
 // Firestore collection, so each tab gets its own response set.
 let SPREADSHEET_ID = "1Uuip-8Sne2oIQeSaAQmbG_URymBybmE7P5mpjEC1Huo"; // taken from the spreadsheet link
 let SHEET_INDEX = 0;                                                // which tab to read (0-based)
+let CLASS_VALUE = "";  // admin-set class: only question rows whose "Class" column matches are used
 
 // Resolved/derived at runtime — don't set these directly.
 let SHEET_NAME = "";           // looked up from the spreadsheet for SHEET_INDEX
@@ -303,6 +308,7 @@ const view=$('#view');
 (function init(){
   const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
   if(localStorage_has('pulse_sheet_index')) SHEET_INDEX=parseInt(localStorage_get('pulse_sheet_index'),10)||0;
+  if(localStorage_has('pulse_class')) CLASS_VALUE=(localStorage_get('pulse_class')||'').trim();
   updateTabsVisibility();   // Results tab is admin-only
   renderAdminPanel();   // builds the settings panel (login form, or the controls if already admin)
   loadQuestions();
@@ -331,7 +337,8 @@ async function loadQuestions(){
   try{
     const meta=await resolveSheet(SPREADSHEET_ID,SHEET_INDEX);          // index -> real tab name + gid
     SHEET_NAME=meta.title;
-    SURVEY_BASE=sanitizeCollection(SHEET_NAME);
+    // Rounds are grouped per sheet tab + class: each class is its own survey.
+    SURVEY_BASE=sanitizeCollection(SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:''));
     QUESTIONS_CSV_URL="https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/export?format=csv&gid="+meta.gid;
     LOCAL_RESPONSES=[];
     await refreshRuns();    // sets FIRESTORE_COLLECTION to the open round ('' = closed)
@@ -340,7 +347,9 @@ async function loadQuestions(){
     if(!r.ok) throw new Error('questions CSV HTTP '+r.status);
     const text=await r.text();
     QUESTIONS=parseQuestionsCSV(text);
-    if(!QUESTIONS.length) throw new Error('no questions parsed from that tab');
+    if(!QUESTIONS.length) throw new Error(CLASS_VALUE
+      ? 'no questions for class "'+CLASS_VALUE+'" in that tab — check the sheet\'s Class column'
+      : 'no questions parsed from that tab');
     alreadySubmitted=false;
     renderAdminPanel();     // refresh sheet info + round controls in the settings panel
     renderTake();
@@ -372,50 +381,70 @@ async function refreshRuns(){
 function updateSrcTag(){
   const el=$('#srcTag'); if(!el) return;
   if(demoMode||!SHEET_NAME){ el.textContent='demo data'; return; }
-  el.textContent='live · '+SHEET_NAME+(ACTIVE_RUN?' · open':' · closed');
+  el.textContent='live · '+SHEET_NAME+(CLASS_VALUE?' · '+CLASS_VALUE:'')+(ACTIVE_RUN?' · open':' · closed');
 }
 
 // Parse a Google Sheet CSV into question objects. Supports two layouts:
-//   - id | type | question | options          (options pipe-separated: "A|B|C")
-//   - ID | Type | Question | Option1 | Option2 | ...   (one option per column)
-// Any column that isn't id/type/question is treated as an option cell, so the
-// option count is flexible (e.g. a 6th option just needs a 6th column).
+//   - id | class | type | question | options        (options pipe-separated: "A|B|C")
+//   - ID | Class | Type | Question | Option1 | ...  (one option per column)
+// A "Class" column (usually the 2nd column) tags each row with the class it
+// belongs to; when the admin has set a class in the settings, only matching
+// rows are used. Any other column that isn't id/class/type/question is
+// treated as an option cell, so the option count is flexible.
 function parseQuestionsCSV(text){
   const rows=parseCSV(text);
   if(!rows.length) return [];
   const head=rows.shift().map(h=>h.toLowerCase().trim());
   const ci=name=>head.indexOf(name);
-  const idIdx=ci('id'), typeIdx=ci('type'), qIdx=ci('question'), optIdx=ci('options');
+  const idIdx=ci('id'), typeIdx=ci('type'), qIdx=ci('question'), optIdx=ci('options'), classIdx=ci('class');
   if(idIdx<0) return [];
-  return rows.filter(r=>r[idIdx]&&r[idIdx].trim()).map(r=>{
-    let options;
-    if(optIdx>=0){
-      const o=(r[optIdx]||'').trim();
-      options=o?o.split('|').map(s=>s.trim()).filter(Boolean):[];
-    }else{
-      options=r.filter((_,i)=>i!==idIdx&&i!==typeIdx&&i!==qIdx).map(s=>(s||'').trim()).filter(Boolean);
-    }
-    return {
-      id:r[idIdx].trim(),
-      type:normalizeType(typeIdx>=0?r[typeIdx]:''),
-      question:(qIdx>=0?(r[qIdx]||''):'').toString().trim(),
-      options
-    };
-  });
+  const wanted=CLASS_VALUE.trim().toLowerCase();
+  return rows
+    .filter(r=>r[idIdx]&&r[idIdx].trim())
+    .filter(r=>{
+      if(classIdx<0||!wanted) return true;  // no class column / no class set → use all rows
+      return (r[classIdx]||'').trim().toLowerCase()===wanted;
+    })
+    .map(r=>{
+      let options;
+      if(optIdx>=0){
+        const o=(r[optIdx]||'').trim();
+        options=o?o.split('|').map(s=>s.trim()).filter(Boolean):[];
+      }else{
+        options=r.filter((_,i)=>i!==idIdx&&i!==typeIdx&&i!==qIdx&&i!==classIdx).map(s=>(s||'').trim()).filter(Boolean);
+      }
+      const rawType=typeIdx>=0?(r[typeIdx]||''):'';
+      const q={
+        id:r[idIdx].trim(),
+        type:normalizeType(rawType),
+        question:(qIdx>=0?(r[qIdx]||''):'').toString().trim(),
+        options
+      };
+      if(q.type==='short') q.count=shortAnswerCount(rawType);
+      return q;
+    });
 }
 
 // Map free-form sheet "Type" text to an internal question type.
 //   Multi-Choise / checkbox     -> multi  (pick many)
 //   Single-Choise / radio       -> choice (pick exactly one)
 //   scale / rating              -> scale
+//   Short Answer N              -> short (N text inputs, labels from the Option columns)
 //   text / open / paragraph     -> text
 function normalizeType(t){
   t=(t||'').toString().toLowerCase();
+  if(/short\s*-?\s*answer/.test(t)) return 'short';
   if(/multi|checkbox|all that apply/.test(t)) return 'multi';
   if(/single|radio|one[\s-]?choice/.test(t)) return 'choice';
   if(/scale|rating|nps|likert/.test(t)) return 'scale';
-  if(/text|open|paragraph|short answer|long answer|free/.test(t)) return 'text';
+  if(/text|open|paragraph|long answer|free/.test(t)) return 'text';
   return 'choice';
+}
+// "Short Answer 3" -> 3 input fields (default 1, capped at 20).
+function shortAnswerCount(rawType){
+  const m=String(rawType||'').match(/(\d+)/);
+  const n=m?parseInt(m[1],10):1;
+  return Math.max(1,Math.min(20,isNaN(n)?1:n));
 }
 
 // Minimal RFC-4180 CSV parser (handles quotes, commas & newlines inside quotes).
@@ -492,6 +521,16 @@ function renderTake(){
       <div class="qtext">${esc(q.question)}<span class="req">*</span></div>`;
     if(q.type==='text'){
       html+=`<textarea id="a_${q.id}" placeholder="Type your answer…">${esc(answers[q.id]||'')}</textarea>`;
+    }else if(q.type==='short'){
+      // "Short Answer N": N one-line inputs; each label comes from the
+      // corresponding Option column. 100-character limit per field.
+      const vals=Array.isArray(answers[q.id])?answers[q.id]:[];
+      for(let k=0;k<(q.count||1);k++){
+        const label=q.options[k]||('Answer '+(k+1));
+        html+=`<div class="field" style="margin-bottom:10px"><label>${esc(label)}</label>
+          <input maxlength="100" id="sa_${q.id}_${k}" value="${esc(vals[k]||'')}"
+            oninput="setShort('${q.id}',${k},this.value)" placeholder="Type your answer… (max 100 characters)"></div>`;
+      }
     }else if(q.type==='multi'){
       const chosen=Array.isArray(answers[q.id])?answers[q.id]:[];
       html+=`<div class="opts">`;
@@ -536,11 +575,30 @@ function toggle(qid,optIndex){
 // An option that invites free text, e.g. "Other (please specify): ___".
 function isOther(o){ return /please specify/i.test(o)||/^\s*other\b/i.test(o); }
 function setOther(qid,val){ answers[qid+'__other']=val; }
+// Store one field of a "Short Answer N" question (100-char cap).
+function setShort(qid,k,val){
+  const q=QUESTIONS.find(x=>x.id===qid); if(!q) return;
+  const cur=Array.isArray(answers[qid])?answers[qid].slice():[];
+  while(cur.length<(q.count||1)) cur.push('');
+  cur[k]=String(val||'').slice(0,100);
+  answers[qid]=cur;
+}
 
 async function submit(){
-  // collect text answers
-  QUESTIONS.forEach(q=>{ if(q.type==='text'){const el=$('#a_'+q.id); if(el) answers[q.id]=el.value.trim();} });
-  const missing=QUESTIONS.filter(q=>{ const a=answers[q.id]; return Array.isArray(a)?!a.length:!a; });
+  // collect text + short-answer inputs
+  QUESTIONS.forEach(q=>{
+    if(q.type==='text'){ const el=$('#a_'+q.id); if(el) answers[q.id]=el.value.trim(); }
+    else if(q.type==='short'){
+      const vals=[];
+      for(let k=0;k<(q.count||1);k++){ const el=$('#sa_'+q.id+'_'+k); vals.push(el?el.value.trim().slice(0,100):(Array.isArray(answers[q.id])?String(answers[q.id][k]||'').trim():'')); }
+      answers[q.id]=vals;
+    }
+  });
+  const missing=QUESTIONS.filter(q=>{
+    const a=answers[q.id];
+    if(q.type==='short') return !Array.isArray(a)||a.length<(q.count||1)||a.some(v=>!v||!String(v).trim());
+    return Array.isArray(a)?!a.length:!a;
+  });
   if(missing.length){ $('#msg').innerHTML=`<div class="banner err">Please answer all questions (${missing.length} left).</div>`; return; }
 
   const btn=document.querySelector('.btn'); btn.textContent='Saving…'; btn.disabled=true;
@@ -655,12 +713,25 @@ async function renderResults(){
 
   QUESTIONS.forEach(q=>{
     const card=document.createElement('div'); card.className='card';
-    card.innerHTML=`<div class="res-q">${esc(q.question)}</div><div class="res-meta">${q.type}</div>`;
+    const metaLabel=q.type==='short'?('short answer × '+(q.count||1)):q.type;
+    card.innerHTML=`<div class="res-q">${esc(q.question)}</div><div class="res-meta">${esc(metaLabel)}</div>`;
     if(q.type==='text'){
       const box=document.createElement('div'); box.className='texts';
       const ans=responses.map(r=>r[q.id]).filter(Boolean);
       box.innerHTML = ans.length? ans.map(a=>`<div class="t">${esc(a)}</div>`).join('') : '<div class="res-meta">No text answers.</div>';
       card.appendChild(box);
+    }else if(q.type==='short'){
+      // One list per input field, headed by its Option-column label.
+      for(let k=0;k<(q.count||1);k++){
+        const label=q.options[k]||('Answer '+(k+1));
+        const box=document.createElement('div'); box.className='texts'; if(k) box.style.marginTop='14px';
+        const ans=responses
+          .map(r=>{ const v=r[q.id]; return Array.isArray(v)?v[k]:(k===0?v:null); })
+          .filter(v=>v!=null&&String(v).trim()!=='');
+        box.innerHTML='<div class="res-meta">'+esc(label)+'</div>'
+          +(ans.length?ans.map(a=>`<div class="t">${esc(a)}</div>`).join(''):'<div class="res-meta">No answers.</div>');
+        card.appendChild(box);
+      }
     }else{
       const counts={}; q.options.forEach(o=>counts[o]=0);
       responses.forEach(r=>{
@@ -749,13 +820,17 @@ function renderAdminPanel(){
       <p>Questions are read live from a Google Spreadsheet. Each <b>tab</b> is its own survey; responses save to a Firestore collection named after that tab.</p>
       <div class="field"><label>Google Spreadsheet link</label><input id="cfgSheetLink" placeholder="https://docs.google.com/spreadsheets/d/.../edit"></div>
       <div class="field"><label>Sheet index (0 = first tab)</label><input id="cfgSheetIndex" type="number" min="0" step="1" placeholder="0"></div>
+      <div class="field"><label>Class — only question rows whose <b>Class</b> column (2nd column) matches are used; leave empty for all rows</label><input id="cfgClass" placeholder="e.g. class1"></div>
       <button class="btn ghost" onclick="saveCfg()">Save settings</button>
       <p id="sheetNameOut" style="margin-top:12px"></p>
       <div id="roundBox" style="margin-top:14px"></div>
       <p style="margin-top:8px">Share the spreadsheet as <b>Anyone with the link → Viewer</b>. First row = headers (<code>ID, Type, Question, Option1, …</code>); each following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>`;
     if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
     if($('#cfgSheetIndex')) $('#cfgSheetIndex').value = SHEET_INDEX;
-    if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b> — round collections are named <b>'+esc(SURVEY_BASE)+'__&lt;date&gt;</b>';
+    if($('#cfgClass')) $('#cfgClass').value = CLASS_VALUE;
+    if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b>'
+      +(CLASS_VALUE?' · class <b>'+esc(CLASS_VALUE)+'</b>':'')
+      +' — round collections are named <b>&lt;date&gt;_'+esc(SHEET_NAME)+(CLASS_VALUE?'_'+esc(CLASS_VALUE):'')+'</b>';
     renderRoundBox();
   }else{
     body.innerHTML=`
@@ -807,13 +882,15 @@ async function beginSurvey(){
     // responses, register it as a closed round so that data stays visible.
     if(!SURVEY_RUNS.length){
       let n=0; try{ n=await fb.countResponses(SURVEY_BASE); }catch(_){}
-      if(n>0) await fb.closeRun(SURVEY_BASE, SURVEY_BASE, n);
+      if(n>0) await fb.closeRun(SURVEY_BASE, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null, count:n});
     }
-    // e.g. Sheet1__2026-08-17_143205; never reuse an existing round's collection
+    // e.g. "2026-08-17_143205_DSA213 Game Programming Studio_class1";
+    // never reuse an existing round's collection.
     const stamp=runStamp();
-    let name=SURVEY_BASE+'__'+stamp, k=2;
-    while(SURVEY_RUNS.some(r=>r.id===name)) name=SURVEY_BASE+'__'+stamp+'-'+(k++);
-    await fb.openRun(name, SURVEY_BASE);
+    const suffix=SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:'');
+    let name=sanitizeCollection(stamp+'_'+suffix), k=2;
+    while(SURVEY_RUNS.some(r=>r.id===name)) name=sanitizeCollection(stamp+'_'+suffix)+'-'+(k++);
+    await fb.openRun(name, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null});
     await refreshRuns();
     alreadySubmitted=false; answers={}; RESULTS_COLLECTION=name; confirmingClose=false;
     updateSrcTag(); renderRoundBox();
@@ -830,7 +907,8 @@ async function closeSurvey(){
     if(!fb||!ACTIVE_RUN) throw new Error('Firebase not ready');
     const id=ACTIVE_RUN.id;
     let n=null; try{ n=await fb.countResponses(id); }catch(_){}
-    await fb.closeRun(id, SURVEY_BASE, n);
+    await fb.closeRun(id, {base:SURVEY_BASE, count:n,
+      sheetName:ACTIVE_RUN.sheetName||SHEET_NAME, class:ACTIVE_RUN.class||CLASS_VALUE||null});
     confirmingClose=false;
     await refreshRuns();
     RESULTS_COLLECTION=id;    // Results opens on the round that was just closed
@@ -859,11 +937,12 @@ function fmtDate(ms){
     +', '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
 }
 
-// Human label for a round in the Results dropdown.
+// Human label for a round in the Results dropdown: just the collection name
+// (it already encodes date_sheetName_class) plus the response count.
 function roundLabel(r){
   if(r.legacy) return r.id+' — all responses';
-  if(r.status==='open') return 'Current round — open'+(r.openedAt?' since '+fmtDate(r.openedAt):'');
-  let l='Closed '+(r.closedAt?fmtDate(r.closedAt):'(date unknown)');
+  if(r.status==='open') return 'Current — '+r.id;
+  let l=r.id;
   if(r.responseCount!=null) l+=' · '+r.responseCount+' response'+(r.responseCount===1?'':'s');
   return l;
 }
@@ -874,10 +953,12 @@ function saveCfg(){
   SPREADSHEET_ID=extractSheetId($('#cfgSheetLink').value);
   let idx=parseInt($('#cfgSheetIndex').value,10); if(isNaN(idx)||idx<0) idx=0;
   SHEET_INDEX=idx;
+  CLASS_VALUE=(($('#cfgClass')&&$('#cfgClass').value)||'').trim();
   localStorage_set('pulse_sheet_id',SPREADSHEET_ID);
   localStorage_set('pulse_sheet_index',String(SHEET_INDEX));
+  localStorage_set('pulse_class',CLASS_VALUE);
   if($('#cfgSheetIndex')) $('#cfgSheetIndex').value=SHEET_INDEX;
-  answers={}; loadQuestions();
+  answers={}; RESULTS_COLLECTION=''; loadQuestions();
 }
 
 // True when responses should be saved to / read from Firestore.
