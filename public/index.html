@@ -523,13 +523,13 @@ function renderTake(){
       html+=`<textarea id="a_${q.id}" placeholder="Type your answer…">${esc(answers[q.id]||'')}</textarea>`;
     }else if(q.type==='short'){
       // "Short Answer N": N one-line inputs; each label comes from the
-      // corresponding Option column. 100-character limit per field.
+      // corresponding Option column. 300-character limit per field.
       const vals=Array.isArray(answers[q.id])?answers[q.id]:[];
       for(let k=0;k<(q.count||1);k++){
         const label=q.options[k]||('Answer '+(k+1));
         html+=`<div class="field" style="margin-bottom:10px"><label>${esc(label)}</label>
-          <input maxlength="100" id="sa_${q.id}_${k}" value="${esc(vals[k]||'')}"
-            oninput="setShort('${q.id}',${k},this.value)" placeholder="Type your answer… (max 100 characters)"></div>`;
+          <input maxlength="300" id="sa_${q.id}_${k}" value="${esc(vals[k]||'')}"
+            oninput="setShort('${q.id}',${k},this.value)" placeholder="Type your answer… (max 300 characters)"></div>`;
       }
     }else if(q.type==='multi'){
       const chosen=Array.isArray(answers[q.id])?answers[q.id]:[];
@@ -575,12 +575,12 @@ function toggle(qid,optIndex){
 // An option that invites free text, e.g. "Other (please specify): ___".
 function isOther(o){ return /please specify/i.test(o)||/^\s*other\b/i.test(o); }
 function setOther(qid,val){ answers[qid+'__other']=val; }
-// Store one field of a "Short Answer N" question (100-char cap).
+// Store one field of a "Short Answer N" question (300-char cap).
 function setShort(qid,k,val){
   const q=QUESTIONS.find(x=>x.id===qid); if(!q) return;
   const cur=Array.isArray(answers[qid])?answers[qid].slice():[];
   while(cur.length<(q.count||1)) cur.push('');
-  cur[k]=String(val||'').slice(0,100);
+  cur[k]=String(val||'').slice(0,300);
   answers[qid]=cur;
 }
 
@@ -590,7 +590,7 @@ async function submit(){
     if(q.type==='text'){ const el=$('#a_'+q.id); if(el) answers[q.id]=el.value.trim(); }
     else if(q.type==='short'){
       const vals=[];
-      for(let k=0;k<(q.count||1);k++){ const el=$('#sa_'+q.id+'_'+k); vals.push(el?el.value.trim().slice(0,100):(Array.isArray(answers[q.id])?String(answers[q.id][k]||'').trim():'')); }
+      for(let k=0;k<(q.count||1);k++){ const el=$('#sa_'+q.id+'_'+k); vals.push(el?el.value.trim().slice(0,300):(Array.isArray(answers[q.id])?String(answers[q.id][k]||'').trim():'')); }
       answers[q.id]=vals;
     }
   });
