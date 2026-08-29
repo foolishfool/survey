@@ -81,7 +81,8 @@
           closedAt: (v.closedAt && v.closedAt.toMillis) ? v.closedAt.toMillis() : null,
           responseCount: (typeof v.responseCount === 'number') ? v.responseCount : null,
           sheetName: v.sheetName || null,
-          class: v.class || null
+          class: v.class || null,
+          surveyId: v.surveyId || null
         });
       });
       return out;
@@ -97,11 +98,13 @@
     async openRun(collName, meta){
       await setDoc(doc(db, '_surveys', collName),
         { base: meta.base, sheetName: meta.sheetName || null, class: meta.class || null,
+          surveyId: meta.surveyId || null,
           status: 'open', openedAt: serverTimestamp() }, { merge: true });
     },
     async closeRun(collName, meta){
       await setDoc(doc(db, '_surveys', collName),
         { base: meta.base, sheetName: meta.sheetName || null, class: meta.class || null,
+          surveyId: meta.surveyId || null,
           status: 'closed', closedAt: serverTimestamp(),
           responseCount: (meta.count == null ? null : meta.count) }, { merge: true });
     }
@@ -229,6 +232,7 @@
 let SPREADSHEET_ID = "1Uuip-8Sne2oIQeSaAQmbG_URymBybmE7P5mpjEC1Huo"; // taken from the spreadsheet link
 let SHEET_INDEX = 0;                                                // which tab to read (0-based)
 let CLASS_VALUE = "";  // admin-set class: only question rows whose "Class" column matches are used
+let SURVEYID_VALUE = ""; // admin-set SurveyID: only question rows whose "SurveyID" column matches are used
 
 // Resolved/derived at runtime — don't set these directly.
 let SHEET_NAME = "";           // looked up from the spreadsheet for SHEET_INDEX
@@ -309,6 +313,7 @@ const view=$('#view');
   const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
   if(localStorage_has('pulse_sheet_index')) SHEET_INDEX=parseInt(localStorage_get('pulse_sheet_index'),10)||0;
   if(localStorage_has('pulse_class')) CLASS_VALUE=(localStorage_get('pulse_class')||'').trim();
+  if(localStorage_has('pulse_surveyid')) SURVEYID_VALUE=(localStorage_get('pulse_surveyid')||'').trim();
   updateTabsVisibility();   // Results tab is admin-only
   renderAdminPanel();   // builds the settings panel (login form, or the controls if already admin)
   loadQuestions();
@@ -337,8 +342,9 @@ async function loadQuestions(){
   try{
     const meta=await resolveSheet(SPREADSHEET_ID,SHEET_INDEX);          // index -> real tab name + gid
     SHEET_NAME=meta.title;
-    // Rounds are grouped per sheet tab + class: each class is its own survey.
-    SURVEY_BASE=sanitizeCollection(SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:''));
+    // Rounds are grouped per sheet tab + class + SurveyID: each combination
+    // is its own survey with its own rounds.
+    SURVEY_BASE=sanitizeCollection(SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:'')+(SURVEYID_VALUE?'_'+SURVEYID_VALUE:''));
     QUESTIONS_CSV_URL="https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/export?format=csv&gid="+meta.gid;
     LOCAL_RESPONSES=[];
     await refreshRuns();    // sets FIRESTORE_COLLECTION to the open round ('' = closed)
@@ -347,9 +353,14 @@ async function loadQuestions(){
     if(!r.ok) throw new Error('questions CSV HTTP '+r.status);
     const text=await r.text();
     QUESTIONS=parseQuestionsCSV(text);
-    if(!QUESTIONS.length) throw new Error(CLASS_VALUE
-      ? 'no questions for class "'+CLASS_VALUE+'" in that tab — check the sheet\'s Class column'
-      : 'no questions parsed from that tab');
+    if(!QUESTIONS.length){
+      const f=[];
+      if(CLASS_VALUE) f.push('class "'+CLASS_VALUE+'"');
+      if(SURVEYID_VALUE) f.push('SurveyID "'+SURVEYID_VALUE+'"');
+      throw new Error(f.length
+        ? 'no questions for '+f.join(' + ')+' in that tab — check the sheet\'s Class / SurveyID columns'
+        : 'no questions parsed from that tab');
+    }
     alreadySubmitted=false;
     renderAdminPanel();     // refresh sheet info + round controls in the settings panel
     renderTake();
@@ -381,15 +392,15 @@ async function refreshRuns(){
 function updateSrcTag(){
   const el=$('#srcTag'); if(!el) return;
   if(demoMode||!SHEET_NAME){ el.textContent='demo data'; return; }
-  el.textContent='live · '+SHEET_NAME+(CLASS_VALUE?' · '+CLASS_VALUE:'')+(ACTIVE_RUN?' · open':' · closed');
+  el.textContent='live · '+SHEET_NAME+(CLASS_VALUE?' · '+CLASS_VALUE:'')+(SURVEYID_VALUE?' · '+SURVEYID_VALUE:'')+(ACTIVE_RUN?' · open':' · closed');
 }
 
 // Parse a Google Sheet CSV into question objects. Supports two layouts:
-//   - id | class | type | question | options        (options pipe-separated: "A|B|C")
-//   - ID | Class | Type | Question | Option1 | ...  (one option per column)
-// A "Class" column (usually the 2nd column) tags each row with the class it
-// belongs to; when the admin has set a class in the settings, only matching
-// rows are used. Any other column that isn't id/class/type/question is
+//   - id | class | surveyid | type | question | options        (options pipe-separated: "A|B|C")
+//   - ID | Class | SurveyID | Type | Question | Option1 | ...  (one option per column)
+// A "Class" column (2nd) and a "SurveyID" column (3rd) tag each row; when the
+// admin has set a class / SurveyID in the settings, only rows matching BOTH
+// are used. Any other column that isn't id/class/surveyid/type/question is
 // treated as an option cell, so the option count is flexible.
 function parseQuestionsCSV(text){
   const rows=parseCSV(text);
@@ -397,13 +408,16 @@ function parseQuestionsCSV(text){
   const head=rows.shift().map(h=>h.toLowerCase().trim());
   const ci=name=>head.indexOf(name);
   const idIdx=ci('id'), typeIdx=ci('type'), qIdx=ci('question'), optIdx=ci('options'), classIdx=ci('class');
+  let sIdIdx=ci('surveyid'); if(sIdIdx<0) sIdIdx=ci('survey id');
   if(idIdx<0) return [];
   const wanted=CLASS_VALUE.trim().toLowerCase();
+  const wantedSid=SURVEYID_VALUE.trim().toLowerCase();
   return rows
     .filter(r=>r[idIdx]&&r[idIdx].trim())
     .filter(r=>{
-      if(classIdx<0||!wanted) return true;  // no class column / no class set → use all rows
-      return (r[classIdx]||'').trim().toLowerCase()===wanted;
+      if(classIdx>=0&&wanted&&(r[classIdx]||'').trim().toLowerCase()!==wanted) return false;
+      if(sIdIdx>=0&&wantedSid&&(r[sIdIdx]||'').trim().toLowerCase()!==wantedSid) return false;
+      return true;  // no column / no value set → that filter is skipped
     })
     .map(r=>{
       let options;
@@ -411,7 +425,7 @@ function parseQuestionsCSV(text){
         const o=(r[optIdx]||'').trim();
         options=o?o.split('|').map(s=>s.trim()).filter(Boolean):[];
       }else{
-        options=r.filter((_,i)=>i!==idIdx&&i!==typeIdx&&i!==qIdx&&i!==classIdx).map(s=>(s||'').trim()).filter(Boolean);
+        options=r.filter((_,i)=>i!==idIdx&&i!==typeIdx&&i!==qIdx&&i!==classIdx&&i!==sIdIdx).map(s=>(s||'').trim()).filter(Boolean);
       }
       const rawType=typeIdx>=0?(r[typeIdx]||''):'';
       const q={
@@ -821,6 +835,7 @@ function renderAdminPanel(){
       <div class="field"><label>Google Spreadsheet link</label><input id="cfgSheetLink" placeholder="https://docs.google.com/spreadsheets/d/.../edit"></div>
       <div class="field"><label>Sheet index (0 = first tab)</label><input id="cfgSheetIndex" type="number" min="0" step="1" placeholder="0"></div>
       <div class="field"><label>Class — only question rows whose <b>Class</b> column (2nd column) matches are used; leave empty for all rows</label><input id="cfgClass" placeholder="e.g. class1"></div>
+      <div class="field"><label>SurveyID — only question rows whose <b>SurveyID</b> column (3rd column) matches are used; leave empty for all rows</label><input id="cfgSurveyId" placeholder="e.g. s1"></div>
       <button class="btn ghost" onclick="saveCfg()">Save settings</button>
       <p id="sheetNameOut" style="margin-top:12px"></p>
       <div id="roundBox" style="margin-top:14px"></div>
@@ -828,9 +843,11 @@ function renderAdminPanel(){
     if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
     if($('#cfgSheetIndex')) $('#cfgSheetIndex').value = SHEET_INDEX;
     if($('#cfgClass')) $('#cfgClass').value = CLASS_VALUE;
+    if($('#cfgSurveyId')) $('#cfgSurveyId').value = SURVEYID_VALUE;
     if($('#sheetNameOut') && SHEET_NAME) $('#sheetNameOut').innerHTML='Tab '+SHEET_INDEX+' → <b>'+esc(SHEET_NAME)+'</b>'
       +(CLASS_VALUE?' · class <b>'+esc(CLASS_VALUE)+'</b>':'')
-      +' — round collections are named <b>&lt;date&gt;_'+esc(SHEET_NAME)+(CLASS_VALUE?'_'+esc(CLASS_VALUE):'')+'</b>';
+      +(SURVEYID_VALUE?' · SurveyID <b>'+esc(SURVEYID_VALUE)+'</b>':'')
+      +' — round collections are named <b>&lt;date&gt;_'+esc(SHEET_NAME)+(CLASS_VALUE?'_'+esc(CLASS_VALUE):'')+(SURVEYID_VALUE?'_'+esc(SURVEYID_VALUE):'')+'</b>';
     renderRoundBox();
   }else{
     body.innerHTML=`
@@ -882,15 +899,15 @@ async function beginSurvey(){
     // responses, register it as a closed round so that data stays visible.
     if(!SURVEY_RUNS.length){
       let n=0; try{ n=await fb.countResponses(SURVEY_BASE); }catch(_){}
-      if(n>0) await fb.closeRun(SURVEY_BASE, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null, count:n});
+      if(n>0) await fb.closeRun(SURVEY_BASE, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null, surveyId:SURVEYID_VALUE||null, count:n});
     }
-    // e.g. "2026-08-17_143205_DSA213 Game Programming Studio_class1";
+    // e.g. "2026-08-17_143205_DSA213 Game Programming Studio_class1_s1";
     // never reuse an existing round's collection.
     const stamp=runStamp();
-    const suffix=SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:'');
+    const suffix=SHEET_NAME+(CLASS_VALUE?'_'+CLASS_VALUE:'')+(SURVEYID_VALUE?'_'+SURVEYID_VALUE:'');
     let name=sanitizeCollection(stamp+'_'+suffix), k=2;
     while(SURVEY_RUNS.some(r=>r.id===name)) name=sanitizeCollection(stamp+'_'+suffix)+'-'+(k++);
-    await fb.openRun(name, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null});
+    await fb.openRun(name, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null, surveyId:SURVEYID_VALUE||null});
     await refreshRuns();
     alreadySubmitted=false; answers={}; RESULTS_COLLECTION=name; confirmingClose=false;
     updateSrcTag(); renderRoundBox();
@@ -908,7 +925,8 @@ async function closeSurvey(){
     const id=ACTIVE_RUN.id;
     let n=null; try{ n=await fb.countResponses(id); }catch(_){}
     await fb.closeRun(id, {base:SURVEY_BASE, count:n,
-      sheetName:ACTIVE_RUN.sheetName||SHEET_NAME, class:ACTIVE_RUN.class||CLASS_VALUE||null});
+      sheetName:ACTIVE_RUN.sheetName||SHEET_NAME, class:ACTIVE_RUN.class||CLASS_VALUE||null,
+      surveyId:ACTIVE_RUN.surveyId||SURVEYID_VALUE||null});
     confirmingClose=false;
     await refreshRuns();
     RESULTS_COLLECTION=id;    // Results opens on the round that was just closed
@@ -954,9 +972,11 @@ function saveCfg(){
   let idx=parseInt($('#cfgSheetIndex').value,10); if(isNaN(idx)||idx<0) idx=0;
   SHEET_INDEX=idx;
   CLASS_VALUE=(($('#cfgClass')&&$('#cfgClass').value)||'').trim();
+  SURVEYID_VALUE=(($('#cfgSurveyId')&&$('#cfgSurveyId').value)||'').trim();
   localStorage_set('pulse_sheet_id',SPREADSHEET_ID);
   localStorage_set('pulse_sheet_index',String(SHEET_INDEX));
   localStorage_set('pulse_class',CLASS_VALUE);
+  localStorage_set('pulse_surveyid',SURVEYID_VALUE);
   if($('#cfgSheetIndex')) $('#cfgSheetIndex').value=SHEET_INDEX;
   answers={}; RESULTS_COLLECTION=''; loadQuestions();
 }
