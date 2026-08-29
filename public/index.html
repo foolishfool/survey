@@ -392,7 +392,11 @@ async function refreshRuns(){
 function updateSrcTag(){
   const el=$('#srcTag'); if(!el) return;
   if(demoMode||!SHEET_NAME){ el.textContent='demo data'; return; }
-  el.textContent='live · '+SHEET_NAME+(CLASS_VALUE?' · '+CLASS_VALUE:'')+(SURVEYID_VALUE?' · '+SURVEYID_VALUE:'')+(ACTIVE_RUN?' · open':' · closed');
+  // Label the values (e.g. "class 1", "survey 2") unless the value already
+  // starts with the word (e.g. "class1" stays as-is).
+  const classLabel=CLASS_VALUE?(/^class/i.test(CLASS_VALUE)?CLASS_VALUE:'class '+CLASS_VALUE):'';
+  const surveyLabel=SURVEYID_VALUE?(/^survey/i.test(SURVEYID_VALUE)?SURVEYID_VALUE:'survey '+SURVEYID_VALUE):'';
+  el.textContent='live · '+SHEET_NAME+(classLabel?' · '+classLabel:'')+(surveyLabel?' · '+surveyLabel:'')+(ACTIVE_RUN?' · open':' · closed');
 }
 
 // Parse a Google Sheet CSV into question objects. Supports two layouts:
