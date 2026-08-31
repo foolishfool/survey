@@ -11,6 +11,15 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Published survey configuration ("_config/current"): which spreadsheet,
+    // sheet index, class and SurveyID are live — read by every visitor so all
+    // browsers show the same survey. Written by the app's admin panel.
+    match /_config/{docId} {
+      allow read: if true;
+      allow create, update: if request.auth != null;
+      allow delete: if false;
+    }
+
     // Survey responses.
     //  - a collection only accepts responses while its round is OPEN
     //    (its "_surveys/<collection>" doc exists with status == 'open'),

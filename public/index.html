@@ -91,6 +91,21 @@
       const snap = await getDoc(doc(db, '_surveys', collName));
       return snap.exists() ? snap.data() : null;
     },
+    // ---- Global survey configuration ----
+    // "_config/current" holds the settings the admin published (spreadsheet,
+    // sheet index, class, SurveyID) so EVERY browser shows the same survey.
+    async getConfig(){
+      const snap = await getDoc(doc(db, '_config', 'current'));
+      return snap.exists() ? snap.data() : null;
+    },
+    async saveConfig(cfg){
+      await setDoc(doc(db, '_config', 'current'),
+        { spreadsheetId: cfg.spreadsheetId || null,
+          sheetIndex: (typeof cfg.sheetIndex === 'number' ? cfg.sheetIndex : 0),
+          class: cfg.class || null,
+          surveyId: cfg.surveyId || null,
+          updatedAt: serverTimestamp() }, { merge: true });
+    },
     async countResponses(coll){
       const snap = await getDocs(collection(db, coll));
       return snap.size;
@@ -229,6 +244,8 @@
 // You pick the spreadsheet (from its link) and a tab by INDEX (0 = first tab).
 // The tab's real NAME is read from the spreadsheet at runtime and used as the
 // Firestore collection, so each tab gets its own response set.
+// These are only DEFAULTS/fallbacks: on load the page fetches the published
+// config from Firestore ("_config/current"), so all browsers stay in sync.
 let SPREADSHEET_ID = "1Uuip-8Sne2oIQeSaAQmbG_URymBybmE7P5mpjEC1Huo"; // taken from the spreadsheet link
 let SHEET_INDEX = 0;                                                // which tab to read (0-based)
 let CLASS_VALUE = "";  // admin-set class: only question rows whose "Class" column matches are used
@@ -305,19 +322,50 @@ let ACTIVE_RUN = null;        // the currently open round, or null (survey close
 let RESULTS_COLLECTION = "";  // the round collection the Results tab is showing
 let RUNS_ERROR = false;       // true when the round lookup itself failed
 let confirmingClose = false;  // two-step confirm for the Close-survey button
+let CONFIG_ERROR = "";        // set when publishing the settings to Firestore failed
 
 const $=s=>document.querySelector(s);
 const view=$('#view');
 
-(function init(){
+(async function init(){
+  // Local values are only a fallback for the very first load / offline case…
   const sid=localStorage_get('pulse_sheet_id'); if(sid) SPREADSHEET_ID=sid;
   if(localStorage_has('pulse_sheet_index')) SHEET_INDEX=parseInt(localStorage_get('pulse_sheet_index'),10)||0;
   if(localStorage_has('pulse_class')) CLASS_VALUE=(localStorage_get('pulse_class')||'').trim();
   if(localStorage_has('pulse_surveyid')) SURVEYID_VALUE=(localStorage_get('pulse_surveyid')||'').trim();
   updateTabsVisibility();   // Results tab is admin-only
   renderAdminPanel();   // builds the settings panel (login form, or the controls if already admin)
+  view.innerHTML='<div class="spin"></div>';
+  // …the published config in Firestore is the source of truth, so every
+  // browser (admin or student) shows the same current survey.
+  try{
+    const fb=await fbWait();
+    const cfg=fb?await fb.getConfig():null;
+    if(cfg){
+      if(cfg.spreadsheetId) SPREADSHEET_ID=cfg.spreadsheetId;
+      if(typeof cfg.sheetIndex==='number'&&cfg.sheetIndex>=0) SHEET_INDEX=cfg.sheetIndex;
+      CLASS_VALUE=(cfg.class||'').trim();
+      SURVEYID_VALUE=(cfg.surveyId||'').trim();
+      renderAdminPanel();  // reflect the published values in the settings fields
+    }
+  }catch(e){ console.error('could not load the published survey config:', e); }
   loadQuestions();
 })();
+
+// Publish the admin's settings so every browser follows them.
+async function publishConfig(){
+  CONFIG_ERROR='';
+  try{
+    const fb=await fbWait();
+    if(!fb) throw new Error('Firebase not ready');
+    await fb.saveConfig({spreadsheetId:SPREADSHEET_ID, sheetIndex:SHEET_INDEX,
+                         class:CLASS_VALUE||null, surveyId:SURVEYID_VALUE||null});
+  }catch(e){
+    CONFIG_ERROR='Settings saved on this browser only — publishing to other browsers failed ('
+      +((e&&e.message)||'unknown error')+'). Make sure the latest firestore.rules are deployed.';
+    console.error('config publish failed:', e);
+  }
+}
 
 // Results are restricted to the admin: the tab only shows when logged in.
 function updateTabsVisibility(){
@@ -842,6 +890,7 @@ function renderAdminPanel(){
       <div class="field"><label>SurveyID — only question rows whose <b>SurveyID</b> column (3rd column) matches are used; leave empty for all rows</label><input id="cfgSurveyId" placeholder="e.g. s1"></div>
       <button class="btn ghost" onclick="saveCfg()">Save settings</button>
       <p id="sheetNameOut" style="margin-top:12px"></p>
+      <p id="cfgMsg" class="banner err" style="display:none;margin-top:8px"></p>
       <div id="roundBox" style="margin-top:14px"></div>
       <p style="margin-top:8px">Share the spreadsheet as <b>Anyone with the link → Viewer</b>. First row = headers (<code>ID, Type, Question, Option1, …</code>); each following row is one question. <code>Type</code> can be <code>Single-Choise</code>, <code>Multi-Choise</code>, <code>scale</code>, or <code>text</code>.</p>`;
     if($('#cfgSheetLink')) $('#cfgSheetLink').value = SPREADSHEET_ID ? "https://docs.google.com/spreadsheets/d/"+SPREADSHEET_ID+"/edit" : "";
@@ -852,6 +901,7 @@ function renderAdminPanel(){
       +(CLASS_VALUE?' · class <b>'+esc(CLASS_VALUE)+'</b>':'')
       +(SURVEYID_VALUE?' · SurveyID <b>'+esc(SURVEYID_VALUE)+'</b>':'')
       +' — round collections are named <b>&lt;date&gt;_'+esc(SHEET_NAME)+(CLASS_VALUE?'_'+esc(CLASS_VALUE):'')+(SURVEYID_VALUE?'_'+esc(SURVEYID_VALUE):'')+'</b>';
+    if($('#cfgMsg')&&CONFIG_ERROR){ $('#cfgMsg').textContent=CONFIG_ERROR; $('#cfgMsg').style.display='block'; }
     renderRoundBox();
   }else{
     body.innerHTML=`
@@ -912,6 +962,7 @@ async function beginSurvey(){
     let name=sanitizeCollection(stamp+'_'+suffix), k=2;
     while(SURVEY_RUNS.some(r=>r.id===name)) name=sanitizeCollection(stamp+'_'+suffix)+'-'+(k++);
     await fb.openRun(name, {base:SURVEY_BASE, sheetName:SHEET_NAME, class:CLASS_VALUE||null, surveyId:SURVEYID_VALUE||null});
+    publishConfig();   // ensure every browser follows the round that just opened
     await refreshRuns();
     alreadySubmitted=false; answers={}; RESULTS_COLLECTION=name; confirmingClose=false;
     updateSrcTag(); renderRoundBox();
@@ -971,7 +1022,7 @@ function roundLabel(r){
 
 function pickRound(id){ RESULTS_COLLECTION=id; renderResults(); }
 
-function saveCfg(){
+async function saveCfg(){
   SPREADSHEET_ID=extractSheetId($('#cfgSheetLink').value);
   let idx=parseInt($('#cfgSheetIndex').value,10); if(isNaN(idx)||idx<0) idx=0;
   SHEET_INDEX=idx;
@@ -982,6 +1033,7 @@ function saveCfg(){
   localStorage_set('pulse_class',CLASS_VALUE);
   localStorage_set('pulse_surveyid',SURVEYID_VALUE);
   if($('#cfgSheetIndex')) $('#cfgSheetIndex').value=SHEET_INDEX;
+  await publishConfig();   // make every browser follow these settings
   answers={}; RESULTS_COLLECTION=''; loadQuestions();
 }
 

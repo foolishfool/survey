@@ -16,6 +16,10 @@ past rounds stay selectable (by date) in the Results tab.
   **class**, and a **SurveyID**. The tab's name is looked up at runtime; tab
   name + class + SurveyID form the survey's *base name* (each combination is
   its own survey with its own rounds).
+  - **Save settings publishes the configuration to Firestore**
+    (`_config/current`), and every page load reads it first — so all browsers
+    (admin and students alike) show the same current survey, not whatever was
+    last set locally in that browser.
   - Sheet layout: first row is the headers
     `ID, Class, SurveyID, Type, Question, Option1, Option2, …`; every
     following row is one question.
@@ -71,7 +75,7 @@ in the rules, and aggregate results server-side.
 ```
 public/index.html        the whole app (HTML + CSS + JS, no build step)
 firebase.json            Firebase Hosting + Firestore config
-firestore.rules          public read; create only into open rounds; _surveys meta
+firestore.rules          public read; create only into open rounds; _surveys + _config meta
 firestore.indexes.json   (none)
 .firebaserc              default project
 ```
