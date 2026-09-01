@@ -29,7 +29,7 @@ past rounds stay selectable (by date) in the Results tab.
   - `Type` can be `Single-Choise`, `Multi-Choise`, `scale`, `text`, or
     `Short Answer N` (N = 1, 2, 3, …): shows N one-line text inputs, each
     labelled by the corresponding `Option` column of that row, with a
-    300-character limit per field. All fields are required; the answers are
+    500-character limit per field. All fields are required; the answers are
     stored as a list and shown per-field in the Results tab.
   - The spreadsheet must be shared as **Anyone with the link → Viewer**.
 - **Rounds** — the survey only accepts responses while a round is open:
